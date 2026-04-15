@@ -1,0 +1,21 @@
+{
+  "name": "codex-task-builder",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "inventory": "node --import tsx src/cli.ts inventory",
+    "generate-family": "node --import tsx src/cli.ts generate-family",
+    "check": "tsc --noEmit",
+    "test:prompts": "node --import tsx tests/prompts.test.ts",
+    "test:validate": "node --import tsx tests/validate.test.ts"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.114.0",
+    "zod": "^4.1.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
