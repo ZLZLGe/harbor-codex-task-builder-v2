@@ -3,7 +3,6 @@ import path from "node:path";
 import {
   assertPathWithinRoots,
   buildFinalRoot,
-  buildQuarantineRoot,
   buildRawRoot,
   copyDir,
   copyFile,
@@ -46,6 +45,21 @@ export function buildMaterializedTaskDir(args: {
   return path.join(args.targetRoot, args.templateId, args.scopeSlug, args.taskName);
 }
 
+export function buildPublishedVariantTaskDir(args: {
+  targetRoot: string;
+  templateId: string;
+  scopeSlug: string;
+  taskName: string;
+  variant: "with_skill" | "no_skill";
+}): string {
+  return buildMaterializedTaskDir({
+    targetRoot: args.targetRoot,
+    templateId: args.templateId,
+    scopeSlug: args.scopeSlug,
+    taskName: `${args.taskName}__${args.variant}`,
+  });
+}
+
 export type MaterializeResult = {
   targetTaskDir: string;
   disposition: "created" | "existing";
@@ -72,7 +86,7 @@ export async function sanitizeAndCopyTask(args: {
   assertPathWithinRoots(args.sourceDraftDir, [rawRoot], "raw task");
   assertPathWithinRoots(
     targetTaskDir,
-    [buildFinalRoot(outputRoot), buildQuarantineRoot(outputRoot), targetRoot],
+    [buildFinalRoot(outputRoot), targetRoot],
     "发布目标",
   );
 

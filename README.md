@@ -85,6 +85,9 @@ npm run generate-family -- \
   - 唯一输出根目录参数
 - `--concurrency`
 - `--max-repair-rounds`
+- `--limit`
+  - 可选，按 unit 限制本次实际执行数量
+  - 程序会先发现 units、读取 published state、筛出 executable units，再最多执行前 N 个；`0` 或未传表示不额外限制
 - `--skip-skill-effect-gate`
 - `--skill-effect-model`
 
@@ -101,19 +104,31 @@ npm run generate-family -- \
   raw/
     <run-id>/<template-id>/<scope>/...
   final/
-    <template-id>/<scope>/<task-name>
-  quarantine/
-    <template-id>/<scope>/<task-name>
+    <template-id>/<scope>/<task-name>__with_skill
+    <template-id>/<scope>/<task-name>__no_skill
+    _skill_effect_buckets/
+      with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
+      with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
 ```
 
 例如：
 
 ```text
-  /Users/leviviya/Documents/Harbor/.local-workspace/codex_task_builder_v2_debugging/
-  raw/20260410.../tools__debugging/01__node-connect/...
-  final/tools__debugging/01__node-connect/transfer1
-  quarantine/tools__debugging/03__session-logs/transfer1
+/Users/leviviya/Documents/Harbor/.local-workspace/codex_task_builder_v2_debugging/
+raw/20260410.../tools__debugging/01__node-connect/...
+final/tools__debugging/01__node-connect/transfer1__with_skill
+final/tools__debugging/01__node-connect/transfer1__no_skill
+final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__node-connect/transfer1__with_skill
+final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__node-connect/transfer1__no_skill
 ```
+
+补充语义：
+
+- `final/` 只保留真正接受的 PF 任务。
+- `__with_skill` 是正式发布体，也是历史去重、重复运行复用、pending slot 判断唯一参考。
+- `__no_skill` 是对照副本，会随 PF 一起发布，但不会参与历史任务扫描。
+- 非 PF 任务不再 materialize 到单独目录，只保留在 `raw/`、`manifest.jsonl` 和 `<run-id>.json` 中。
+- 旧布局 `final/<template-id>/<scope>/<task-name>` 不兼容；当前代码只识别 `*__with_skill`。上线前需要手动清理或迁移旧 `final/`。
 
 ## Workspace 语义
 
@@ -144,14 +159,30 @@ npm run generate-family -- \
   - 每个 task 单独经历 `write -> blocking review -> static validate -> runtime -> skill-effect -> repair`
 - 不再有独立 family reviewer
   - 去重改为 writer 主动避重 + 单任务 blocking reviewer 兜底
-  - 去重范围只包含 `final-root` 下已经发布的 sibling / 历史任务
+  - 去重范围只包含 `final-root` 下已经发布的 `*__with_skill` sibling / 历史任务
 - 一旦某个 task 达到 `PF`
-  - 即 `with_skill_pass__no_skill_fail`
-  - 会立即 materialize 到 `<output-root>/final/...`
+  - 即 `with_skill` 通过，且 `no_skill` 满足“结果文件正常、无 exception、reward < 1”的 `with_skill_pass__no_skill_fail`
+  - 会立即 materialize 到 `<output-root>/final/.../<task>__with_skill` 和 `<output-root>/final/.../<task>__no_skill`
+  - 同时镜像到 `<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/...`
   - 后续 task 可以读取这个刚发布的 sibling，但不会重新打开它
 - 一个 family 允许部分成功
   - 已经通过的 task 会保留在 `final/`
-  - 后续失败的 task 单独进入 `quarantine/`
+  - 后续失败的 task 只保留在 `raw/` 和 run summary / manifest 里，不再进入 `quarantine/`
+
+skill-effect gate 现在进一步区分：
+
+- `with_skill_pass__no_skill_fail`
+  - 真正可接受的 PF；`no_skill` 必须是有效 reward 失败
+- `with_skill_pass__no_skill_invalid_fail`
+  - `no_skill` 是异常失败，必须继续 repair，不能发布
+- 其他 bucket
+  - 一律继续 repair，直到达到 PF 或耗尽 repair 轮数
+
+重复运行同一条命令时：
+
+- `raw/` 每次 runId 唯一，不会冲突
+- `final/` 只把 `*__with_skill` 视为正式已发布任务并参与复用
+- `*__no_skill` 是否存在不影响已发布判断
 
 ## 当前不再支持的旧接口
 

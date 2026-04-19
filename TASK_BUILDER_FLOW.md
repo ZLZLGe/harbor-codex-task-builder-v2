@@ -6,7 +6,7 @@
 
 `codex_task_builder_v2` 不是一个单纯的“任务生成器”，而是一条闭环流水线：
 
-`family planner -> task writer -> task blocking reviewer -> static validate -> Harbor Oracle runtime -> skill-effect gate -> repair -> PF 立即 publish / 最终 quarantine`
+`family planner -> task writer -> task blocking reviewer -> static validate -> Harbor Oracle runtime -> skill-effect gate -> repair -> PF 立即双版本 publish / 非 PF 仅留 raw`
 
 核心目标有两个：
 
@@ -65,18 +65,20 @@
 - output root：`/Users/leviviya/Documents/Harbor/codex_task_builder_v2_runs`
 - raw runs：`<output-root>/raw`
 - final tasks：`<output-root>/final`
-- quarantine：`<output-root>/quarantine`
+- PF bucket 镜像：`<output-root>/final/_skill_effect_buckets`
 
 最终发布目录结构固定为：
 
 ```text
-<output-root>/final/<template-id>/<scope>/<task-name>
+<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/<template-id>/<scope>/<task-name>__no_skill
 ```
 
-失败任务隔离目录结构固定为：
+PF bucket 镜像目录结构固定为：
 
 ```text
-<output-root>/quarantine/<template-id>/<scope>/<task-name>
+<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
 ```
 
 其中：
@@ -87,6 +89,8 @@
 - `task-name`
   - `similar1`, `similar2`, ...
   - `transfer1`, `transfer2`, ...
+  - 正式扫描和复用只认 `*__with_skill`
+  - `*__no_skill` 只是对照副本
 
 ## 4. 核心数据模型
 
@@ -175,6 +179,12 @@ CLI 现在只保留两类命令：
 
 如果传入这些旧参数，CLI 会直接报错。
 
+当前 `generate-family` 还支持：
+
+- `--limit`
+  - 在完成 unit 发现、published-state 判断并筛出 executable units 后，最多执行前 N 个 unit
+  - 这是 unit 级限制，不是单个 family 内的 task 数量限制，也不是 similar / transfer 数量限制
+
 ## 6. 完整造任务流程
 
 下面按实际执行顺序说明。
@@ -209,10 +219,14 @@ CLI 现在只保留两类命令：
 
 下已经发布的任务：
 
-- 识别已有的 `similarN`
-- 识别已有的 `transferN`
+- 只识别已有的 `similarN__with_skill`
+- 只识别已有的 `transferN__with_skill`
+- 会忽略对应的 `*__no_skill`
+- 也不会兼容旧布局 `<task-name>`
 
 然后只补缺失槽位。
+
+如果显式传了 `--limit`，程序会在这些 executable units 上再应用一次数量裁剪，只继续执行前 N 个 unit；这里限制的是 unit 数量，不是单个 family 内的 task 数量，也不是 `similar-count` / `transfer-count`。
 
 例如目标是：
 
@@ -424,20 +438,29 @@ runtime 通过标准：
 如果没有显式 `--skip-skill-effect-gate`，每个通过 Oracle runtime 的任务都会继续做真实对照：
 
 - `with_skill`
-  - 直接用当前 draft task 运行 Codex
+  - 先把当前 draft task 快照到 `variants/with_skill/`
+  - 再基于这份快照运行 Codex
 - `no_skill`
-  - 复制一份 task 变体
+  - 从 `variants/with_skill/` 派生出 `variants/no_skill/`
   - 从 `environment/Dockerfile` 中删除 `COPY skills ...` 相关行
-  - 再运行 Codex
+  - 再基于 `variants/no_skill/` 运行 Codex
 
-当前 bucket 有四种：
+当前 bucket 有五种：
 
 - `with_skill_pass__no_skill_fail`
+- `with_skill_pass__no_skill_invalid_fail`
 - `with_skill_fail__no_skill_fail`
 - `with_skill_pass__no_skill_pass`
 - `with_skill_fail__no_skill_pass`
 
-其中只有 `with_skill_pass__no_skill_fail` 视为接受；其余三种 bucket 都会触发 repair。
+其中：
+
+- `with_skill_pass__no_skill_fail`
+  - 只有 `with_skill` 通过，且 `no_skill` 形成“结果文件正常、无 exception、reward < 1”的有效失败时才成立
+- `with_skill_pass__no_skill_invalid_fail`
+  - 表示 `no_skill` 是异常失败，必须优先修复 variant / verifier / runtime 问题
+
+只有 `with_skill_pass__no_skill_fail` 视为接受；其余所有 bucket 都会触发 repair。
 
 ### 第 12 步：repair
 
@@ -471,28 +494,33 @@ drafts/<task-id>/
 
 修完后只会回到**当前 task** 的下一轮 reviewer / static / runtime / skill-effect，不会把已经通过并发布的其他 task 重新拉回流程。
 
-### 第 13 步：publish / quarantine
+### 第 13 步：publish / 保留 raw
 
-当前 task 一旦达到下面条件：
+当前 task 在 blocking reviewer、static validate、Harbor Oracle runtime 都通过之后，发布分两条路径：
 
-- blocking reviewer 通过
-- static validate 通过
-- Harbor Oracle runtime 通过
-- skill-effect bucket 为 `with_skill_pass__no_skill_fail`
-
-就会被视为 `PF`，并立即：
-
-- 复制到 `final`
-- 追加到当前 unit 的已发布 sibling 列表
+- 默认开启 skill-effect gate
+  - 只有当 skill-effect bucket 为 `with_skill_pass__no_skill_fail`
+    - 即 `with_skill` 通过
+    - 且 `no_skill` 是“结果文件正常、无 exception、reward < 1”的有效失败
+  - 才会被视为 `PF`，并立即：
+    - 从接受那一轮的 `variants/with_skill` 复制到 `final/<template-id>/<scope>/<task-name>__with_skill`
+    - 从接受那一轮的 `variants/no_skill` 复制到 `final/<template-id>/<scope>/<task-name>__no_skill`
+    - 同步镜像到 `final/_skill_effect_buckets/with_skill_pass__no_skill_fail/...`
+    - 追加到当前 unit 的已发布 sibling 列表
+- 显式关闭 skill-effect gate（`--skip-skill-effect-gate`）
+  - runtime 通过后就会直接发布
+  - 只会把当前 draft 复制到 `final/<template-id>/<scope>/<task-name>__with_skill`
+  - 不会生成 `__no_skill`
+  - 也不会写入 `final/_skill_effect_buckets/`
 
 后续 task 可以读取这个刚发布的 sibling，但不会重新打开它。
 
-如果当前 task 在用尽 repair 轮数后仍未达到 `PF`，才会被复制到 `quarantine`。
+如果当前 task 在用尽 repair 轮数后仍未达到上面的发布条件，则不会被复制到额外目录，只会保留在当前 run 的 `raw/`、manifest 和 run summary 中。
 
 因此当前实现允许：
 
 - 同一个 family 中部分 task 已经发布到 `final`
-- 另一些 task 最终进入 `quarantine`
+- 另一些 task 未发布，但仍可回到 `raw` 查看最后一次 draft、runtime 与 skill-effect 证据
 
 复制时只保留 allowlist：
 
@@ -503,18 +531,24 @@ drafts/<task-id>/
 - `solution/`
 - `tests/`
 
-实际发布路径为：
+默认开启 gate 且达到 PF 时，实际发布路径为：
 
 ```text
-<output-root>/final/<template-id>/<scope>/<task-name>
-<output-root>/quarantine/<template-id>/<scope>/<task-name>
+<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/<template-id>/<scope>/<task-name>__no_skill
 ```
 
-skill-effect bucket 也会分别落盘到：
+PF bucket 会额外落盘到：
 
 ```text
-<output-root>/final/_skill_effect_buckets/<bucket>/<template-id>/<scope>/<task-name>
-<output-root>/quarantine/_skill_effect_buckets/<bucket>/<template-id>/<scope>/<task-name>
+<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
+```
+
+显式关闭 gate 时，实际发布路径为：
+
+```text
+<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
 ```
 
 ## 7. 产物与日志
@@ -552,4 +586,4 @@ output root 顶层还会额外写：
 
 ## 9. 一句话总结
 
-**当前 `codex_task_builder_v2` 的主流程是：先把 template 和 input skills 组装成 family unit，再让 Codex 基于 `template_source/`、`input_skills/`、Harbor 参考材料和已发布任务做 family 规划，然后按 `similar -> transfer` 的固定顺序逐个任务写作、单题 blocking 审查、static validate、Harbor Oracle runtime 和 skill-effect 对照；某个任务一旦达到 `with_skill_pass__no_skill_fail` 就立刻发布到 `<output-root>/final`，失败任务最终进入 `<output-root>/quarantine`。**
+**当前 `codex_task_builder_v2` 的主流程是：先把 template 和 input skills 组装成 family unit，再让 Codex 基于 `template_source/`、`input_skills/`、Harbor 参考材料和已发布任务做 family 规划，然后按 `similar -> transfer` 的固定顺序逐个任务写作、单题 blocking 审查、static validate、Harbor Oracle runtime 和 skill-effect 对照；默认 gate 开启时，某个任务只有在达到真正 PF 的 `with_skill_pass__no_skill_fail` 时才会把 `__with_skill` / `__no_skill` 两份快照一起发布到 `<output-root>/final`；如果显式关闭 skill-effect gate，则 runtime 通过后只发布 `__with_skill`，其他失败结果只留在 `raw`。**

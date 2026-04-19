@@ -28,13 +28,15 @@
 最终发布目录结构固定为：
 
 ```text
-<output-root>/final/<template-id>/<scope>/<task-name>
+<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/<template-id>/<scope>/<task-name>__no_skill
 ```
 
-失败任务隔离目录结构固定为：
+PF skill-effect bucket 镜像目录固定为：
 
 ```text
-<output-root>/quarantine/<template-id>/<scope>/<task-name>
+<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
 ```
 
 其中：
@@ -44,6 +46,14 @@
   - `per-skill` 模式固定为目标 input skill 的 `dirName`
 - `task-name`
   - 只能是 `similar1`、`similar2`、`transfer1`、`transfer2` 这类 canonical name
+  - published scan / 历史去重 / 重复运行复用只认 `*__with_skill`
+  - `*__no_skill` 只是对照副本，不参与历史任务集合
+
+补充要求：
+
+- 非 PF 任务不再 materialize 到独立目录，只保留在 `raw/`、run summary 和 `manifest.jsonl`
+- 旧布局 `final/<template-id>/<scope>/<task-name>` 不兼容，当前代码只识别 `*__with_skill`
+- 上线前需要手动清理或迁移旧 `final/`
 
 family 层要求：
 
@@ -293,9 +303,10 @@ scope 约束：
 
 ### 10.3 skill-effect gate 的接受口径
 
-当前 bucket 有四种：
+当前 bucket 有五种：
 
 - `with_skill_pass__no_skill_fail`
+- `with_skill_pass__no_skill_invalid_fail`
 - `with_skill_fail__no_skill_fail`
 - `with_skill_pass__no_skill_pass`
 - `with_skill_fail__no_skill_pass`
@@ -304,14 +315,25 @@ scope 约束：
 
 - 接受：
   - `with_skill_pass__no_skill_fail`
+    - `with_skill` 必须满足 pass
+    - `no_skill` 必须满足 valid reward fail：有正常 `result.json`、无 `exception_info`、reward 为有限数值且 `< 1`
 - 不接受，必须修：
+  - `with_skill_pass__no_skill_invalid_fail`
+    - `no_skill` 是异常失败：缺 `result.json`、不可解析、有 `exception_info`、缺 reward 或 reward 非数值
   - `with_skill_fail__no_skill_fail`
   - `with_skill_pass__no_skill_pass`
   - `with_skill_fail__no_skill_pass`
 
+进一步约束：
+
+- `with_skill pass` 只有在 `result.json` 可解析、无 `exception_info`、reward 为有限数值且 `>= 1`、并且退出码为 `0` 时才成立
+- `no_skill` 的有效失败不要求退出码为 `0`
+- 除 `with_skill_pass__no_skill_fail` 以外，其余所有 bucket 都必须继续 repair
+
 因此，不合格任务通常包括：
 
 - `no_skill` 也能通过
+- `no_skill` 直接异常退出，没有形成有效 reward 失败
 - `with_skill` 反而更差
 - with-skill / no-skill 对照没有形成稳定 skill bottleneck
 
@@ -340,12 +362,27 @@ scope 约束：
 - 满足要求
   - 发布到 `<output-root>/final`
 - 不满足要求
-  - 进入 `<output-root>/quarantine`
+  - 只保留在 `raw/` 与 run summary / manifest 中
 
-skill-effect bucket 还会额外同步到：
+最终发布分两种情况：
 
-- `<output-root>/final/_skill_effect_buckets/...`
-- `<output-root>/quarantine/_skill_effect_buckets/...`
+- 默认开启 skill-effect gate，且任务达到 `with_skill_pass__no_skill_fail`
+  - 发布双版本：
+    - `<output-root>/final/<template-id>/<scope>/<task-name>__with_skill`
+    - `<output-root>/final/<template-id>/<scope>/<task-name>__no_skill`
+  - 其中：
+    - `__with_skill` 来自接受那一轮的 `variants/with_skill`
+    - `__no_skill` 来自接受那一轮的 `variants/no_skill`
+    - `final/_skill_effect_buckets/` 只保留 PF bucket，并同样发布这两份目录
+- 显式关闭 skill-effect gate（`--skip-skill-effect-gate`）
+  - 只发布单版本：
+    - `<output-root>/final/<template-id>/<scope>/<task-name>__with_skill`
+  - 这条路径不会生成或发布 `__no_skill`
+  - 也不会写入 `final/_skill_effect_buckets/`
+
+补充说明：
+
+- 非 PF bucket 以及失败任务只在 `raw/artifacts` 中保留，不会 materialize 到 `final` 之外的其他目录
 
 当前执行语义还有两个关键点：
 
@@ -355,11 +392,15 @@ skill-effect bucket 还会额外同步到：
 因此同一个 family 允许出现：
 
 - 一部分 task 已发布到 `final`
-- 另一部分 task 最终进入 `quarantine`
+  - 默认 gate 开启且通过时，同时保留 `__with_skill` / `__no_skill`
+  - 显式 skip-gate 时，只保留 `__with_skill`
+- 另一部分 task 未发布，但仍可通过 `raw/`、run summary 和 `manifest.jsonl` 回溯
 
 当前实现下，一个任务要进入发布态，至少意味着：
 
 - task blocking reviewer 未判失败
 - static validate 通过
 - Harbor Oracle runtime 通过
-- skill-effect gate 落在 `with_skill_pass__no_skill_fail`，或者显式关闭了 skill-effect gate
+- 并且满足下面二选一：
+  - skill-effect gate 落在 `with_skill_pass__no_skill_fail`
+  - 或显式关闭了 skill-effect gate

@@ -19,11 +19,13 @@ import {
 
 export type SkillEffectBucket =
   | "with_skill_pass__no_skill_fail"
+  | "with_skill_pass__no_skill_invalid_fail"
   | "with_skill_fail__no_skill_fail"
   | "with_skill_pass__no_skill_pass"
   | "with_skill_fail__no_skill_pass";
 
 export type SkillEffectVariant = "with_skill" | "no_skill";
+export type AgentComparisonStatus = "pass" | "valid_reward_fail" | "invalid_fail";
 
 export type AgentRunEvidence = {
   variant: SkillEffectVariant;
@@ -49,6 +51,8 @@ export type AgentRunEvidence = {
 export type AgentRunResult = {
   variant: SkillEffectVariant;
   passed: boolean;
+  comparisonStatus: AgentComparisonStatus;
+  comparisonReason: string;
   issues: string[];
   failureKind?: RuntimeFailureKind;
   evidence: AgentRunEvidence;
@@ -57,6 +61,7 @@ export type AgentRunResult = {
 export type SkillEffectEvaluationResult = {
   bucket: SkillEffectBucket;
   repairRequired: boolean;
+  pairRoot: string;
   withSkill: AgentRunResult;
   noSkill: AgentRunResult;
 };
@@ -245,7 +250,6 @@ export async function prepareNoSkillVariant(options: {
   sourceTaskDir: string;
   targetTaskDir: string;
 }): Promise<{ targetTaskDir: string; removedCopyLines: number }> {
-  await fs.rm(options.targetTaskDir, { recursive: true, force: true });
   await copyDir(options.sourceTaskDir, options.targetTaskDir);
 
   const dockerfilePath = path.join(options.targetTaskDir, "environment", "Dockerfile");
@@ -260,6 +264,16 @@ export async function prepareNoSkillVariant(options: {
   return {
     targetTaskDir: options.targetTaskDir,
     removedCopyLines: stripped.removedCount,
+  };
+}
+
+export async function prepareWithSkillVariant(options: {
+  sourceTaskDir: string;
+  targetTaskDir: string;
+}): Promise<{ targetTaskDir: string }> {
+  await copyDir(options.sourceTaskDir, options.targetTaskDir);
+  return {
+    targetTaskDir: options.targetTaskDir,
   };
 }
 
@@ -382,37 +396,52 @@ async function runAgentVariant(options: {
     ...(evidence.trajectoryPath ? [{ label: "trajectory", path: evidence.trajectoryPath }] : []),
   ]);
 
+  const finalizeResult = (result: {
+    comparisonStatus: AgentComparisonStatus;
+    comparisonReason: string;
+    issues: string[];
+    failureKind?: RuntimeFailureKind;
+  }): AgentRunResult => ({
+    variant: options.variant,
+    passed: result.comparisonStatus === "pass",
+    comparisonStatus: result.comparisonStatus,
+    comparisonReason: result.comparisonReason,
+    issues: result.issues,
+    failureKind: result.failureKind,
+    evidence,
+  });
+
   if (!trialResultPath) {
-    return {
-      variant: options.variant,
-      passed: false,
+    evidence.summary = "missing result.json";
+    return finalizeResult({
+      comparisonStatus: "invalid_fail",
+      comparisonReason: "missing result.json",
       issues: [`harbor run 未产出可解析的 result.json: ${summary}`],
       failureKind: "harbor-task",
-      evidence,
-    };
+    });
   }
 
   let trialResult: unknown;
   try {
     trialResult = JSON.parse(await readText(trialResultPath)) as unknown;
   } catch {
-    return {
-      variant: options.variant,
-      passed: false,
+    evidence.summary = "result.json parse failed";
+    return finalizeResult({
+      comparisonStatus: "invalid_fail",
+      comparisonReason: "result.json parse failed",
       issues: ["harbor trial result.json 解析失败，详见 harbor-run.log"],
       failureKind: "harbor-task",
-      evidence,
-    };
+    });
   }
 
   if (!trialResult || typeof trialResult !== "object") {
-    return {
-      variant: options.variant,
-      passed: false,
+    evidence.summary = "invalid result.json structure";
+    return finalizeResult({
+      comparisonStatus: "invalid_fail",
+      comparisonReason: "invalid result.json structure",
       issues: ["harbor trial result.json 结构异常"],
       failureKind: "harbor-task",
-      evidence,
-    };
+    });
   }
 
   const resultRecord = trialResult as Record<string, unknown>;
@@ -424,13 +453,13 @@ async function runAgentVariant(options: {
       typeof exception.exception_message === "string"
         ? exception.exception_message.slice(0, 300)
         : "未提供 exception_message";
-    return {
-      variant: options.variant,
-      passed: false,
+    evidence.summary = `${exceptionType}: ${exceptionMessage}`;
+    return finalizeResult({
+      comparisonStatus: "invalid_fail",
+      comparisonReason: `exception_info: ${exceptionType}`,
       issues: [`harbor agent 运行异常: ${exceptionType}: ${exceptionMessage}`],
       failureKind: "harbor-task",
-      evidence,
-    };
+    });
   }
 
   const verifierResult =
@@ -441,56 +470,63 @@ async function runAgentVariant(options: {
   evidence.reward = reward;
 
   if (reward === null) {
-    return {
-      variant: options.variant,
-      passed: false,
+    evidence.summary = "missing reward";
+    return finalizeResult({
+      comparisonStatus: "invalid_fail",
+      comparisonReason: "missing reward",
       issues: ["harbor verifier 未产出 reward（reward.txt/reward.json）"],
       failureKind: "harbor-task",
-      evidence,
-    };
+    });
   }
 
   if (reward < 1.0) {
     evidence.summary = `reward=${reward}`;
-    return {
-      variant: options.variant,
-      passed: false,
+    return finalizeResult({
+      comparisonStatus: "valid_reward_fail",
+      comparisonReason: `reward=${reward} < 1.0`,
       issues: [`harbor verifier reward=${reward} < 1.0`],
       failureKind: "harbor-reward",
-      evidence,
-    };
+    });
   }
 
   if (runResult.code !== 0) {
-    return {
-      variant: options.variant,
-      passed: false,
+    evidence.summary = `reward=${reward}, exit_code=${runResult.code}`;
+    return finalizeResult({
+      comparisonStatus: "invalid_fail",
+      comparisonReason: `non-zero exit code ${runResult.code}`,
       issues: [`harbor run 返回非零退出码: ${summary}`],
       failureKind: "harbor-task",
-      evidence,
-    };
+    });
   }
 
   evidence.summary = `reward=${reward}`;
-  return {
-    variant: options.variant,
-    passed: true,
+  return finalizeResult({
+    comparisonStatus: "pass",
+    comparisonReason: `reward=${reward}`,
     issues: [],
-    evidence,
-  };
+  });
 }
 
-export function buildSkillEffectBucket(withSkillPassed: boolean, noSkillPassed: boolean): SkillEffectBucket {
-  if (withSkillPassed && !noSkillPassed) {
+export function buildSkillEffectBucket(
+  withSkillStatus: AgentComparisonStatus,
+  noSkillStatus: AgentComparisonStatus,
+): SkillEffectBucket {
+  if (withSkillStatus === "pass" && noSkillStatus === "valid_reward_fail") {
     return "with_skill_pass__no_skill_fail";
   }
-  if (!withSkillPassed && !noSkillPassed) {
-    return "with_skill_fail__no_skill_fail";
+  if (withSkillStatus === "pass" && noSkillStatus === "invalid_fail") {
+    return "with_skill_pass__no_skill_invalid_fail";
   }
-  if (withSkillPassed && noSkillPassed) {
+  if (withSkillStatus === "pass" && noSkillStatus === "pass") {
     return "with_skill_pass__no_skill_pass";
   }
-  return "with_skill_fail__no_skill_pass";
+  if (noSkillStatus === "pass") {
+    return "with_skill_fail__no_skill_pass";
+  }
+  if (noSkillStatus === "valid_reward_fail" || noSkillStatus === "invalid_fail") {
+    return "with_skill_fail__no_skill_fail";
+  }
+  return "with_skill_fail__no_skill_fail";
 }
 
 export function isRepairRequiredSkillEffectBucket(bucket: SkillEffectBucket): boolean {
@@ -507,7 +543,13 @@ export function buildSkillEffectIssues(taskId: string, evaluation: SkillEffectEv
   }
 
   const issues: ValidationIssue[] = [];
-  if (evaluation.bucket === "with_skill_pass__no_skill_pass") {
+  if (evaluation.bucket === "with_skill_pass__no_skill_invalid_fail") {
+    issues.push({
+      scope: "skill-effect",
+      taskId,
+      message: "真实对照结果为 with_skill pass / no_skill invalid fail；当前 no_skill 不是有效 reward 失败，必须继续修复 verifier、variant 构造或任务可用性问题",
+    });
+  } else if (evaluation.bucket === "with_skill_pass__no_skill_pass") {
     issues.push({
       scope: "skill-effect",
       taskId,
@@ -535,7 +577,17 @@ export function buildSkillEffectIssues(taskId: string, evaluation: SkillEffectEv
   issues.push({
     scope: "skill-effect",
     taskId,
+    message: `with_skill 判定: ${evaluation.withSkill.comparisonStatus} (${evaluation.withSkill.comparisonReason})`,
+  });
+  issues.push({
+    scope: "skill-effect",
+    taskId,
     message: `no_skill 实跑摘要: ${evaluation.noSkill.evidence.summary}`,
+  });
+  issues.push({
+    scope: "skill-effect",
+    taskId,
+    message: `no_skill 判定: ${evaluation.noSkill.comparisonStatus} (${evaluation.noSkill.comparisonReason})`,
   });
   return issues;
 }
@@ -559,24 +611,30 @@ export async function runSkillEffectEvaluation(args: {
   const pairRoot = buildVariantLogRoot(args.workspace, args.plan, args.cycle, args.attemptIndex);
   const withSkillLogsDir = path.join(pairRoot, "with_skill");
   const noSkillLogsDir = path.join(pairRoot, "no_skill");
+  const withSkillTaskDir = path.join(pairRoot, "variants", "with_skill");
   const noSkillTaskDir = path.join(pairRoot, "variants", "no_skill");
+
+  await prepareWithSkillVariant({
+    sourceTaskDir: args.draftTaskDir,
+    targetTaskDir: withSkillTaskDir,
+  });
+
+  await prepareNoSkillVariant({
+    sourceTaskDir: withSkillTaskDir,
+    targetTaskDir: noSkillTaskDir,
+  });
 
   const withSkill = await runAgentVariant({
     variant: "with_skill",
     workspace: args.workspace,
     plan: args.plan,
-    taskDir: args.draftTaskDir,
+    taskDir: withSkillTaskDir,
     logsDir: withSkillLogsDir,
     runtimeEnvironment: args.runtimeEnvironment,
     modelName: args.modelName,
     apiKey: args.apiKey,
     baseUrl: args.baseUrl,
     env: args.env,
-  });
-
-  await prepareNoSkillVariant({
-    sourceTaskDir: args.draftTaskDir,
-    targetTaskDir: noSkillTaskDir,
   });
 
   const noSkill = await runAgentVariant({
@@ -592,10 +650,11 @@ export async function runSkillEffectEvaluation(args: {
     env: args.env,
   });
 
-  const bucket = buildSkillEffectBucket(withSkill.passed, noSkill.passed);
+  const bucket = buildSkillEffectBucket(withSkill.comparisonStatus, noSkill.comparisonStatus);
   return {
     bucket,
     repairRequired: isRepairRequiredSkillEffectBucket(bucket),
+    pairRoot,
     withSkill,
     noSkill,
   };

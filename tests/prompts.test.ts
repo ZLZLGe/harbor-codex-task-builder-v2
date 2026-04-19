@@ -68,12 +68,12 @@ const historyAwareUnit: GenerationUnit = {
       derivedTaskId: "similar1",
       taskRole: "similar",
       roleOrdinal: 1,
-      taskDir: "/tmp/output/final/tools__debugging/01__node-connect/similar1",
-      planPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1/plan.json",
-      instructionPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1/instruction.md",
-      taskTomlPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1/task.toml",
-      testOutputsPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1/tests/test_outputs.py",
-      environmentDir: "/tmp/output/final/tools__debugging/01__node-connect/similar1/environment",
+      taskDir: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill",
+      planPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/plan.json",
+      instructionPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/instruction.md",
+      taskTomlPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/task.toml",
+      testOutputsPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/tests/test_outputs.py",
+      environmentDir: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/environment",
     },
   ],
 };
@@ -159,7 +159,7 @@ const repairPrompt = buildRepairPrompt({
   blockingIssues: ["reviewer:similar1 instruction.md leaked the skill name"],
   staticIssues: ["static:similar1 task.toml metadata.source_template_id is wrong"],
   runtimeIssues: ["runtime:similar1 harbor verifier reward=0 < 1.0"],
-  skillEffectIssues: ["skill-effect:similar1 with_skill pass / no_skill pass"],
+  skillEffectIssues: ["skill-effect:similar1 with_skill_pass__no_skill_invalid_fail"],
 });
 
 const allModeUnit = buildGenerationUnits(template, [debugSkill, sessionSkill], {
@@ -179,14 +179,17 @@ assert.match(brief, /这些 injected skills 是只读 payload/);
 assert.match(brief, /template_source\/environment\/skills\/ 里的内容只作为模板上下文参考/);
 assert.match(brief, /最终 shipped skills 只由 input_skills\/ 决定/);
 assert.doesNotMatch(brief, /builder_refs\/harbor/);
-assert.match(brief, /只需要检查 final-root 下已经发布的 sibling tasks/);
+assert.match(brief, /只需要检查 final-root 下已经发布的 \*__with_skill sibling tasks/);
 
 assert.match(plannerPrompt, /完整检查 template_source\/ 和 input_skills\//);
 assert.doesNotMatch(plannerPrompt, /builder_refs\/harbor/);
 assert.match(plannerPrompt, /templateId: tools__debugging/);
 assert.match(plannerPrompt, /完整检查当前目标输入 shipped skill 的目录/);
 assert.match(plannerPrompt, /input_skills\/ 才是最终 shipped skill 来源/);
+assert.match(plannerPrompt, /已发布 \*__with_skill 任务/);
+assert.match(plannerPrompt, /不要把 \*__no_skill 对照副本视为正式历史任务/);
 assert.match(historyPlannerPrompt, /已发布 Harbor family 目录/);
+assert.match(historyPlannerPrompt, /\*__with_skill/);
 
 assert.match(writerPrompt, /template_source\/、input_skills\/、当前 task 的 plan\.json blueprint/);
 assert.doesNotMatch(writerPrompt, /builder_refs\/harbor/);
@@ -194,18 +197,21 @@ assert.match(writerPrompt, /metadata\.source_template_id 必须等于 "tools__de
 assert.match(writerPrompt, /environment\/skills\/ 中只能保留一个 shipped skill/);
 assert.match(writerPrompt, /这些 injected skills 是只读 payload/);
 assert.match(writerPrompt, /不是当前任务必须参考的去重对象/);
-assert.match(writerPrompt, /只以 final-root 下已经发布的同 family 任务为准/);
+assert.match(writerPrompt, /只以 final-root 下已经发布的 \*__with_skill 同 family 任务为准/);
+assert.match(writerPrompt, /不要把 \*__no_skill 对照副本当成历史任务/);
 assert.match(writerPrompt, /不得把 skills 复制到普通运行时路径/);
 assert.match(writerPrompt, /唯一允许语句是 COPY skills \/root\/\.codex\/skills/);
 assert.match(writerPrompt, /不要再添加任何把 skills\/ 或 \/root\/\.codex\/skills 复制、移动、同步、软链接到其他目录/);
 assert.match(historyWriterPrompt, /已发布 Harbor family 目录/);
+assert.match(historyWriterPrompt, /similar1__with_skill/);
 
 assert.match(blockingReviewerPrompt, /单题 blocking 审查/);
 assert.match(blockingReviewerPrompt, /writer 不应改写 injected skill payload/);
 assert.match(blockingReviewerPrompt, /taskResults 中只返回当前这个任务/);
-assert.match(blockingReviewerPrompt, /已发布 sibling \/ 历史任务/);
+assert.match(blockingReviewerPrompt, /已发布 \*__with_skill sibling \/ 历史任务/);
 assert.doesNotMatch(blockingReviewerPrompt, /builder_refs\/harbor/);
 assert.match(historyBlockingReviewerPrompt, /已发布 Harbor family 目录/);
+assert.match(historyBlockingReviewerPrompt, /\*__with_skill sibling \/ 历史任务/);
 
 assert.match(repairPrompt, /不要修改 template_source\/、input_skills\/、artifacts\//);
 assert.doesNotMatch(repairPrompt, /builder_refs\//);
@@ -213,6 +219,8 @@ assert.match(repairPrompt, /不要修改 environment\/skills\/ 下 injected skil
 assert.match(repairPrompt, /metadata\.source_template_id/);
 assert.match(repairPrompt, /blocking reviewer:/);
 assert.match(repairPrompt, /唯一允许语句是 COPY skills \/root\/\.codex\/skills/);
+assert.match(repairPrompt, /with_skill_pass__no_skill_invalid_fail/);
+assert.match(repairPrompt, /已发布 \*__with_skill sibling \/ 历史任务过近/);
 assert.doesNotMatch(repairPrompt, /family:/);
 
 assert.match(allModeBrief, /当前 family 需要保留全部输入 skills 的关键能力点和实际解题收益/);

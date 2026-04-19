@@ -14,10 +14,6 @@ export function buildFinalRoot(outputRoot: string): string {
   return path.join(outputRoot, "final");
 }
 
-export function buildQuarantineRoot(outputRoot: string): string {
-  return path.join(outputRoot, "quarantine");
-}
-
 export type CommandResult = {
   code: number;
   stdout: string;

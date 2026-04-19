@@ -91,7 +91,7 @@ function renderHarborOracleBaseline(): string {
   return dedent(`
     Harbor verifier 契约:
     - Harbor 会执行 /tests/test.sh 作为 verifier 入口。
-    - Harbor 只识别 /logs/verifier/reward.txt 和 /logs/verifier/reward.json；写到其他位置不会被识别。
+    - Harbor 只识别 /logs/verifier/reward.txt 和 /logs/verifier/reward.json；写到其他位置不会被识别。所以要稳定在这两个路径下写reward，方便后续判断任务是否通过。
     - tests/test.sh 不得在未写出 reward 的情况下直接结束；无论测试通过还是失败，都必须稳定写出 reward。
     - tests/test.sh 在写入 verifier 日志、CTRF 或 reward 前，必须先执行 mkdir -p /logs/verifier。
   `);
@@ -101,7 +101,7 @@ function renderTaskArtifactContracts(): string {
   return dedent(`
     关键文件契约:
     - solution/solve.sh 必须基于输入资产、任务规则和公开依赖生成可通过测试的结果，不得直接搬运任务内现成答案。
-    - solution/solve.sh、tests/test.sh、tests/test_outputs.py 不得依赖任何 shipped skill 安装路径、skill 模块或 skill 脚本。
+    - solution/solve.sh、tests/test.sh、tests/test_outputs.py 不得依赖任何 shipped skill 安装路径、不能直接导入skill路径，原因是：假设agent要执行去掉skill后的任务时，做完以后通过test.sh去验收agent做的结果是否正确，如果有直接导入skill路径之类的话，那么由于dockerfile里面去掉skill了，就会出错。
     - tests/test_outputs.py 只能校验 instruction.md 或输入资产中已经说明、或可直接推出的输出契约、允许接口和可观察结果，并面向结果语义而不是未承诺的实现细节。
     - 对自由文本主输出，tests/test_outputs.py 不得依赖固定关键词、固定短语、固定同义词集合或唯一措辞，除非 instruction.md 明确把这些字面形式写成验收要求。
     - 如果 tests/test_outputs.py 依赖未承诺的实现细节，如内部函数名、唯一中间步骤或固定日志文本，应视为 hidden requirement。
@@ -208,7 +208,7 @@ export function buildTaskBuilderBrief(unit: GenerationUnit): string {
        - tests/test_outputs.py
        - plan.json
     7. plan.json 是 planner 产物，后续 materialize/publish 也要保留，不要删除。
-    8. 同一 workspace 内，后续任务生成时只需要检查 final-root 下已经发布的 sibling tasks，并主动避免与它们在任务场景、输入资产、输出语义和测试判定方式上过于接近；不要把尚未发布的 drafts 当成去重基准。
+    8. 同一 workspace 内，后续任务生成时只需要检查 final-root 下已经发布的 *__with_skill sibling tasks，并主动避免与它们在任务场景、输入资产、输出语义和测试判定方式上过于接近；不要把 *__no_skill 对照副本或尚未发布的 drafts 当成去重基准。
     9. environment/Dockerfile 必须遵守下方 Dockerfile 约束。
     10. 最终 Harbor 任务面向用户可见的文本必须使用英文，至少包括 instruction.md、task.toml 的 metadata.name 和 metadata.description。
     11. drafts/<task_name>/environment/skills/ 由系统从 input_skills/ 预注入，视为只读 payload；不要修改这些 skill 内容。
@@ -236,7 +236,7 @@ export function buildFamilyPlannerPrompt(unit: GenerationUnit): string {
       : "- 必须基于该 shipped skill 的目录内容提炼 2-4 个独有、非通用模板化的关键能力点，并以这些能力点约束 family 规划。";
 
   return dedent(`
-    先阅读 TASK_BUILDER_BRIEF.md，然后完整检查 template_source/ 和 input_skills/；如果 final-root 已有同 family 任务，也必须直接读取这些已发布任务目录。
+    先阅读 TASK_BUILDER_BRIEF.md，然后完整检查 template_source/ 和 input_skills/；如果 final-root 已有同 family 的已发布 *__with_skill 任务，也必须直接读取这些已发布任务目录。
 
     模板摘要:
     - templateId: ${template.templateId}
@@ -265,7 +265,8 @@ export function buildFamilyPlannerPrompt(unit: GenerationUnit): string {
     - family 内任务应通过任务目标、输入资产、输出语义和验证方式拉开差异，不要只靠轻微改名或改参数区分。
     - template_source/ 只是参考，不是模板；必要时可以新增全新输入资产，而不是机械复用原始素材。
     - input_skills/ 才是最终 shipped skill 来源；不要把 template_source/environment/skills/ 误当成最终 shipped skill 集合。
-    - 如果 final-root 已有同 family 的已发布任务，必须先直接读取它们，并主动避免与这些历史任务在任务场景、输入资产、输出语义和测试判定方式上过于接近。
+    - 如果 final-root 已有同 family 的已发布 *__with_skill 任务，必须先直接读取它们，并主动避免与这些历史任务在任务场景、输入资产、输出语义和测试判定方式上过于接近。
+    - 不要把 *__no_skill 对照副本视为正式历史任务。
     - 任务应规划为 hard。
     - 每个候选任务的 skillBenefitRationale 必须明确说明依赖了哪些关键能力点，以及没有这些能力点时通用 agent 最可能卡在哪一步。
     - 不要规划出只需复用模板任务求解骨架、仅换业务皮，或资产天然暴露解法结构的 family。
@@ -300,7 +301,7 @@ export function buildTaskWriterPrompt(unit: GenerationUnit, plan: DerivedTaskPla
       `);
 
   return dedent(`
-    先阅读 TASK_BUILDER_BRIEF.md，然后阅读 template_source/、input_skills/、当前 task 的 plan.json blueprint，以及 final-root 下已发布的同 family 任务。
+    先阅读 TASK_BUILDER_BRIEF.md，然后阅读 template_source/、input_skills/、当前 task 的 plan.json blueprint，以及 final-root 下已发布的 *__with_skill 同 family 任务。
 
     当前 task blueprint:
     ${JSON.stringify(plan, null, 2)}
@@ -311,8 +312,9 @@ export function buildTaskWriterPrompt(unit: GenerationUnit, plan: DerivedTaskPla
     写作前先确认：
     - drafts/${plan.derivedTaskId}/ 是当前任务目录。
     - 如果 drafts/ 下还存在其他 sibling task 目录，它们只是 workspace 中尚未发布的草稿，不是当前任务必须参考的去重对象。
-    - 当前任务的 sibling / 历史去重，只以 final-root 下已经发布的同 family 任务为准。
-    - 还必须检查 final-root 中已经发布的同 family 任务；优先阅读：
+    - 当前任务的 sibling / 历史去重，只以 final-root 下已经发布的 *__with_skill 同 family 任务为准。
+    - 不要把 *__no_skill 对照副本当成历史任务。
+    - 还必须检查 final-root 中已经发布的 *__with_skill 同 family 任务；优先阅读：
       - <published_task>/plan.json
       - <published_task>/instruction.md
       - <published_task>/task.toml
@@ -395,7 +397,7 @@ export function buildBlockingReviewerPrompt(
     - template_source/
     - input_skills/
     - drafts/${plan.derivedTaskId}/
-    - final-root 下同 family 已发布任务
+    - final-root 下同 family 已发布 *__with_skill 任务
 
     当前 family 规划:
     ${JSON.stringify(familyPlan, null, 2)}
@@ -426,7 +428,7 @@ export function buildBlockingReviewerPrompt(
       - fresh state、no-op、仅复制/改名已有 deliverable、直接搬运任务内现成答案时，当前 verifier 是否仍会错误通过
       - solution/solve.sh、tests/test.sh、tests/test_outputs.py 是否直接引用 environment/skills/**、/root/.codex/skills/**、/app/skills/** 或其他 skill 安装路径/模块；只要存在这种硬依赖，就直接判定失败
       - solution/solve.sh、tests/test.sh、tests/test_outputs.py、environment/Dockerfile 的路径契约是否一致
-      - 当前 task 是否与 final-root 下已发布 sibling / 历史任务在任务场景、输入资产、输出语义或测试判定方式上过于接近；如果过近，直接判定失败
+      - 当前 task 是否与 final-root 下已发布 *__with_skill sibling / 历史任务在任务场景、输入资产、输出语义或测试判定方式上过于接近；如果过近，直接判定失败
       - 运行时需要写入的目录是否显式创建
       - environment/Dockerfile 是否显式声明 WORKDIR；如果不是 /root，相关脚本路径是否仍然一致
       - environment/Dockerfile 的 FROM 是否使用了私有/本地 registry，或未允许的 registry
@@ -534,7 +536,7 @@ export function buildRepairPrompt(args: {
     - 必须保留 plan.json，不要删除。
     - instruction.md、task.toml 的 metadata.name、metadata.description 必须保持英文，不要写中文任务描述。
     - 不要改变 task.toml 的 metadata.id、metadata.source_template_id、metadata.task_role、metadata.primary_output_file 所代表的任务身份；如当前这些字段缺失或错误，可以把它们修正到与 plan.json 一致。
-    - 如果 blocking reviewer 指出当前 task 与已发布 sibling / 历史任务过近，优先通过修改 instruction、输入资产、输出契约或验收对象把它们拉开差异；不要改 task id 或 role。
+    - 如果 blocking reviewer 指出当前 task 与已发布 *__with_skill sibling / 历史任务过近，优先通过修改 instruction、输入资产、输出契约或验收对象把它们拉开差异；不要改 task id 或 role。
     - 不要修改 environment/skills/ 下 injected skill payload；如果需要调整 skill 使用方式，应通过题目本身、输入资产、tests 或 solution 修正，而不是改 skill 内容。
     - 如果 solution/solve.sh 或 tests/** 直接调用 skill 模块，必须去耦：把最小必需逻辑搬到任务自身代码里，或改成公开通用依赖；最终参考解与 verifier 在有 skill / 无 skill 两种评测设置都要能运行。
     - 不要引入隐藏测试要求；instruction、tests、solution 应保持一致。

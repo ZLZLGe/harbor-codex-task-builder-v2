@@ -9,7 +9,7 @@ import {
   buildRunSummaryPath,
   writeRunSummary,
 } from "../src/manifest.js";
-import { sanitizeAndCopyTask } from "../src/materialize.js";
+import { buildPublishedVariantTaskDir, sanitizeAndCopyTask } from "../src/materialize.js";
 import { inspectPublishedFamily, selectExecutableUnits } from "../src/published.js";
 import {
   flattenFamilyPlan,
@@ -23,11 +23,11 @@ import {
   isAcceptedSkillEffectBucket,
   isRepairRequiredSkillEffectBucket,
   prepareNoSkillVariant,
+  prepareWithSkillVariant,
   stripSkillCopyLines,
 } from "../src/skill_effect.js";
 import {
   buildFinalRoot,
-  buildQuarantineRoot,
   buildRawRoot,
   ensureDir,
   pathExists,
@@ -332,8 +332,7 @@ gpus = 0
   const outputRoot = path.join(fixtureRoot, "materialize-output");
   const rawRoot = buildRawRoot(outputRoot);
   const finalRoot = buildFinalRoot(outputRoot);
-  const quarantineRoot = buildQuarantineRoot(outputRoot);
-  await Promise.all([ensureDir(rawRoot), ensureDir(finalRoot), ensureDir(quarantineRoot)]);
+  await Promise.all([ensureDir(rawRoot), ensureDir(finalRoot)]);
 
   const sourceDraftDir = path.join(rawRoot, "run-1", template.templateId, nodeConnectSkill.dirName, "transfer1");
   await ensureDir(sourceDraftDir);
@@ -348,25 +347,41 @@ gpus = 0
     sourceDraftDir,
     templateId: template.templateId,
     scopeSlug: nodeConnectSkill.dirName,
-    taskName: "transfer1",
+    taskName: "transfer1__with_skill",
     rawRoot,
     targetRoot: finalRoot,
   });
   assert.equal(result.disposition, "created");
   assert.equal(
     result.targetTaskDir,
-    path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "transfer1"),
+    path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "transfer1__with_skill"),
+  );
+  assert.equal(
+    buildPublishedVariantTaskDir({
+      targetRoot: finalRoot,
+      templateId: template.templateId,
+      scopeSlug: nodeConnectSkill.dirName,
+      taskName: "transfer1",
+      variant: "no_skill",
+    }),
+    path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "transfer1__no_skill"),
   );
 }
 
 {
   const finalRoot = path.join(fixtureRoot, "published-final");
-  const familyDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "transfer1");
+  const familyDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "transfer1__with_skill");
   await ensureDir(path.join(familyDir, "tests"));
   await writeText(path.join(familyDir, "plan.json"), "{}\n");
   await writeText(path.join(familyDir, "instruction.md"), "x\n");
   await writeText(path.join(familyDir, "task.toml"), "x\n");
   await writeText(path.join(familyDir, "tests", "test_outputs.py"), "x\n");
+  const ignoredOldFamilyDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "similar1");
+  await ensureDir(path.join(ignoredOldFamilyDir, "tests"));
+  await writeText(path.join(ignoredOldFamilyDir, "plan.json"), "{}\n");
+  await writeText(path.join(ignoredOldFamilyDir, "instruction.md"), "x\n");
+  await writeText(path.join(ignoredOldFamilyDir, "task.toml"), "x\n");
+  await writeText(path.join(ignoredOldFamilyDir, "tests", "test_outputs.py"), "x\n");
 
   const state = await inspectPublishedFamily(perSkillUnit, finalRoot);
   assert.equal(state.finalFamilyDir, path.join(finalRoot, template.templateId, nodeConnectSkill.dirName));
@@ -375,20 +390,41 @@ gpus = 0
 
   const selected = selectExecutableUnits([
     { ...perSkillUnit, pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
+    { ...perSkillUnit, scopeSlug: "queued", pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
     { ...perSkillUnit, scopeSlug: "done", pendingSimilarOrdinals: [], pendingTransferOrdinals: [] },
   ]);
-  assert.equal(selected.executableUnits.length, 1);
+  assert.equal(selected.executableUnits.length, 2);
   assert.equal(selected.skippedCount, 1);
+
+  const limitedSelected = selectExecutableUnits([
+    { ...perSkillUnit, pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
+    { ...perSkillUnit, scopeSlug: "queued", pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
+    { ...perSkillUnit, scopeSlug: "done", pendingSimilarOrdinals: [], pendingTransferOrdinals: [] },
+  ], 1);
+  assert.equal(limitedSelected.executableUnits.length, 1);
+  assert.equal(limitedSelected.skippedCount, 2);
+
+  const unlimitedSelected = selectExecutableUnits([
+    { ...perSkillUnit, pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
+    { ...perSkillUnit, scopeSlug: "queued", pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
+    { ...perSkillUnit, scopeSlug: "done", pendingSimilarOrdinals: [], pendingTransferOrdinals: [] },
+  ], 0);
+  assert.equal(unlimitedSelected.executableUnits.length, 2);
+  assert.equal(unlimitedSelected.skippedCount, 1);
 }
 
 {
   const stripped = stripSkillCopyLines("FROM ubuntu:24.04\nCOPY skills /root/.codex/skills\nRUN echo ok\n");
   assert.equal(stripped.removedCount, 1);
   assert.match(stripped.text, /RUN echo ok/);
-  assert.equal(buildSkillEffectBucket(true, false), "with_skill_pass__no_skill_fail");
+  assert.equal(buildSkillEffectBucket("pass", "valid_reward_fail"), "with_skill_pass__no_skill_fail");
+  assert.equal(buildSkillEffectBucket("pass", "invalid_fail"), "with_skill_pass__no_skill_invalid_fail");
+  assert.equal(buildSkillEffectBucket("pass", "pass"), "with_skill_pass__no_skill_pass");
   assert.equal(isAcceptedSkillEffectBucket("with_skill_pass__no_skill_fail"), true);
+  assert.equal(isAcceptedSkillEffectBucket("with_skill_pass__no_skill_invalid_fail"), false);
   assert.equal(isAcceptedSkillEffectBucket("with_skill_fail__no_skill_fail"), false);
   assert.equal(isRepairRequiredSkillEffectBucket("with_skill_fail__no_skill_fail"), true);
+  assert.equal(isRepairRequiredSkillEffectBucket("with_skill_pass__no_skill_invalid_fail"), true);
   assert.equal(isRepairRequiredSkillEffectBucket("with_skill_fail__no_skill_pass"), true);
   assert.equal(
     buildSkillEffectBucketRoot("/tmp/output/final", "with_skill_pass__no_skill_fail"),
@@ -399,14 +435,25 @@ gpus = 0
 {
   const sourceTaskDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-no-skill-source-"));
   const targetTaskDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-no-skill-target-"));
+  const withSkillTargetDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-with-skill-target-"));
   try {
     await ensureDir(path.join(sourceTaskDir, "environment"));
     await writeText(
       path.join(sourceTaskDir, "environment", "Dockerfile"),
       "FROM ubuntu:24.04\nCOPY skills /root/.codex/skills\nRUN echo ok\n",
     );
-    const prepared = await prepareNoSkillVariant({
+    await writeText(path.join(sourceTaskDir, "task.toml"), "x\n");
+    await writeText(path.join(sourceTaskDir, "instruction.md"), "x\n");
+    await ensureDir(path.join(sourceTaskDir, "solution"));
+    await ensureDir(path.join(sourceTaskDir, "tests"));
+    await writeText(path.join(sourceTaskDir, "plan.json"), "{}\n");
+    const withSkillPrepared = await prepareWithSkillVariant({
       sourceTaskDir,
+      targetTaskDir: withSkillTargetDir,
+    });
+    assert.equal(await pathExists(path.join(withSkillPrepared.targetTaskDir, "task.toml")), true);
+    const prepared = await prepareNoSkillVariant({
+      sourceTaskDir: withSkillPrepared.targetTaskDir,
       targetTaskDir,
     });
     const dockerfile = await readText(path.join(prepared.targetTaskDir, "environment", "Dockerfile"));
@@ -415,5 +462,6 @@ gpus = 0
   } finally {
     await fs.rm(sourceTaskDir, { recursive: true, force: true });
     await fs.rm(targetTaskDir, { recursive: true, force: true });
+    await fs.rm(withSkillTargetDir, { recursive: true, force: true });
   }
 }

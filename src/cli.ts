@@ -11,7 +11,7 @@ import {
   type SkillMode,
 } from "./discovery.js";
 import { appendManifest, writeRunSummary, type ManifestEntry } from "./manifest.js";
-import { buildMaterializedTaskDir, sanitizeAndCopyTask } from "./materialize.js";
+import { buildPublishedVariantTaskDir, sanitizeAndCopyTask } from "./materialize.js";
 import { applyPublishedFamilyState, inspectPublishedFamily, selectExecutableUnits } from "./published.js";
 import type { DerivedTaskPlan, FamilyPlan, WriterSummary } from "./schema.js";
 import { flattenFamilyPlan } from "./schema.js";
@@ -27,7 +27,6 @@ import {
   DEFAULT_OUTPUT_ROOT,
   TEMPLATE_ROOT,
   buildFinalRoot,
-  buildQuarantineRoot,
   buildRawRoot,
   ensureDir,
   writeJson,
@@ -61,7 +60,21 @@ type FamilyExecutionResult = {
   status: "completed" | "failed";
   issues: string[];
   publishedTaskIds: string[];
-  quarantinedTaskIds: string[];
+  failedTaskIds: string[];
+  publishedVariantDirs: Array<{
+    derivedTaskId: string;
+    withSkillDir: string;
+    noSkillDir: string | null;
+    bucketWithSkillDir: string | null;
+    bucketNoSkillDir: string | null;
+  }>;
+  failedTaskRefs: Array<{
+    derivedTaskId: string;
+    draftDir: string;
+    latestRuntimeResultPath?: string;
+    latestSkillEffectResultPath?: string;
+    latestSkillEffectPairRoot?: string;
+  }>;
   skillEffectResults: Array<{
     derivedTaskId: string;
     bucket: SkillEffectBucket;
@@ -72,6 +85,10 @@ type FamilyExecutionResult = {
     noSkillPassed: boolean;
     noSkillReward: number | null;
     noSkillSummary: string;
+    noSkillComparisonStatus: string;
+    noSkillComparisonReason: string;
+    withSkillVariantDir: string;
+    noSkillVariantDir: string;
   }>;
   skillEffectBucketCounts: Partial<Record<SkillEffectBucket, number>>;
   workspace?: FamilyWorkspace;
@@ -95,6 +112,8 @@ type TaskCycleState = {
   runtimeEvidence?: RuntimeEvidence;
   skillEffectEvaluation?: SkillEffectEvaluationResult;
   skillEffectResultPath?: string;
+  acceptedWithSkillVariantDir?: string;
+  acceptedNoSkillVariantDir?: string;
   passed: boolean;
 };
 
@@ -102,7 +121,6 @@ type ExecuteFamilyOptions = {
   outputRoot: string;
   rawRoot: string;
   finalRoot: string;
-  quarantineRoot: string;
   runtimeEnvironment: RuntimeEnvironment;
   maxRepairRounds: number;
   skillEffectEnabled: boolean;
@@ -287,6 +305,16 @@ function upsertPublishedTask(unit: GenerationUnit, publishedTask: PublishedTaskI
   unit.publishedTasks = nextPublishedTasks;
 }
 
+function buildFailedTaskRef(taskState: TaskCycleState): FamilyExecutionResult["failedTaskRefs"][number] {
+  return {
+    derivedTaskId: taskState.plan.derivedTaskId,
+    draftDir: taskState.draftDir,
+    latestRuntimeResultPath: taskState.runtimeEvidence?.resultPath,
+    latestSkillEffectResultPath: taskState.skillEffectResultPath,
+    latestSkillEffectPairRoot: taskState.skillEffectEvaluation?.pairRoot,
+  };
+}
+
 async function inventory(templateRoot: string): Promise<void> {
   const templates = await discoverTaskTemplates(templateRoot);
   const rows = await Promise.all(
@@ -345,6 +373,8 @@ async function repairTaskDraft(
   taskState.lastMutatedCycle = cycle;
   taskState.runtimePassedCycle = null;
   taskState.skillEffectAcceptedCycle = null;
+  taskState.acceptedWithSkillVariantDir = undefined;
+  taskState.acceptedNoSkillVariantDir = undefined;
   taskState.passed = false;
   await writeJson(
     path.join(workspace.artifactsDir, `${taskState.plan.derivedTaskId}.repair.${taskState.repairRoundsUsed}.json`),
@@ -389,7 +419,9 @@ async function executeFamilyGeneration(
   const appendRunManifest = (entry: Omit<ManifestEntry, "timestamp">) => appendManifest(entry, options.outputRoot);
   const writeWorkspaceSummary = (summary: unknown) => writeRunSummary(workspace.runId, summary, options.outputRoot);
   const publishedTaskIds: string[] = [];
-  const quarantinedTaskIds: string[] = [];
+  const failedTaskIds: string[] = [];
+  const publishedVariantDirs: FamilyExecutionResult["publishedVariantDirs"] = [];
+  const failedTaskRefs: FamilyExecutionResult["failedTaskRefs"] = [];
   const finalIssues: string[] = [];
   const skillEffectResults: FamilyExecutionResult["skillEffectResults"] = [];
   const skillEffectBucketCounts: Partial<Record<SkillEffectBucket, number>> = {};
@@ -460,7 +492,9 @@ async function executeFamilyGeneration(
         status: "failed",
         issues,
         publishedTaskIds: [],
-        quarantinedTaskIds: [],
+        failedTaskIds: [],
+        publishedVariantDirs: [],
+        failedTaskRefs: [],
         skillEffectResults: [],
         skillEffectBucketCounts: {},
         workspace,
@@ -499,6 +533,8 @@ async function executeFamilyGeneration(
         lastMutatedCycle: null,
         runtimePassedCycle: null,
         skillEffectAcceptedCycle: null,
+        acceptedWithSkillVariantDir: undefined,
+        acceptedNoSkillVariantDir: undefined,
         blockingIssues: [],
         staticIssues: [],
         runtimeIssues: [],
@@ -519,6 +555,8 @@ async function executeFamilyGeneration(
         taskState.staticIssues = await validateDraftStatic(taskState.draftDir, plan, unit);
         taskState.runtimeIssues = [];
         taskState.skillEffectIssues = [];
+        taskState.acceptedWithSkillVariantDir = undefined;
+        taskState.acceptedNoSkillVariantDir = undefined;
         taskState.passed = false;
 
         const preRuntimeIssues = [...taskState.blockingIssues, ...taskState.staticIssues];
@@ -581,6 +619,8 @@ async function executeFamilyGeneration(
           taskState.skillEffectAcceptedCycle = null;
           taskState.skillEffectEvaluation = undefined;
           taskState.skillEffectResultPath = undefined;
+          taskState.acceptedWithSkillVariantDir = undefined;
+          taskState.acceptedNoSkillVariantDir = undefined;
           await appendRunManifest({
             runId: workspace.runId,
             templateId: unit.template.templateId,
@@ -607,6 +647,8 @@ async function executeFamilyGeneration(
         taskState.runtimePassedCycle = cycle;
 
         if (!options.skillEffectEnabled) {
+          taskState.acceptedWithSkillVariantDir = taskState.draftDir;
+          taskState.acceptedNoSkillVariantDir = undefined;
           taskState.passed = true;
           break;
         }
@@ -627,6 +669,12 @@ async function executeFamilyGeneration(
         taskState.skillEffectEvaluation = skillEffectResult;
         taskState.skillEffectIssues = buildSkillEffectIssues(plan.derivedTaskId, skillEffectResult);
         taskState.skillEffectAcceptedCycle = skillEffectResult.repairRequired ? null : cycle;
+        taskState.acceptedWithSkillVariantDir = skillEffectResult.repairRequired
+          ? undefined
+          : skillEffectResult.withSkill.evidence.variantTaskDir;
+        taskState.acceptedNoSkillVariantDir = skillEffectResult.repairRequired
+          ? undefined
+          : skillEffectResult.noSkill.evidence.variantTaskDir;
         taskState.skillEffectResultPath = path.join(
           workspace.artifactsDir,
           `${plan.derivedTaskId}.skill-effect.cycle-${cycle}.attempt-${skillEffectAttemptIndex}.json`,
@@ -672,21 +720,58 @@ async function executeFamilyGeneration(
           noSkillPassed: taskState.skillEffectEvaluation.noSkill.passed,
           noSkillReward: taskState.skillEffectEvaluation.noSkill.evidence.reward ?? null,
           noSkillSummary: taskState.skillEffectEvaluation.noSkill.evidence.summary,
+          noSkillComparisonStatus: taskState.skillEffectEvaluation.noSkill.comparisonStatus,
+          noSkillComparisonReason: taskState.skillEffectEvaluation.noSkill.comparisonReason,
+          withSkillVariantDir: taskState.skillEffectEvaluation.withSkill.evidence.variantTaskDir,
+          noSkillVariantDir: taskState.skillEffectEvaluation.noSkill.evidence.variantTaskDir,
         });
         recordSkillEffectBucketCount(skillEffectBucketCounts, taskState.skillEffectEvaluation.bucket);
       }
 
       if (taskState.passed) {
-        const materializeResult = await sanitizeAndCopyTask({
-          sourceDraftDir: taskState.draftDir,
+        const withSkillSourceDir = taskState.acceptedWithSkillVariantDir ?? taskState.draftDir;
+        const withSkillTargetDir = buildPublishedVariantTaskDir({
+          targetRoot: options.finalRoot,
           templateId: unit.template.templateId,
           scopeSlug: unit.scopeSlug,
           taskName: plan.derivedTaskId,
+          variant: "with_skill",
+        });
+        const withSkillResult = await sanitizeAndCopyTask({
+          sourceDraftDir: withSkillSourceDir,
+          templateId: unit.template.templateId,
+          scopeSlug: unit.scopeSlug,
+          taskName: `${plan.derivedTaskId}__with_skill`,
           rawRoot: options.rawRoot,
           targetRoot: options.finalRoot,
         });
+        let noSkillTargetDir: string | null = null;
+        if (taskState.acceptedNoSkillVariantDir) {
+          noSkillTargetDir = buildPublishedVariantTaskDir({
+            targetRoot: options.finalRoot,
+            templateId: unit.template.templateId,
+            scopeSlug: unit.scopeSlug,
+            taskName: plan.derivedTaskId,
+            variant: "no_skill",
+          });
+          await sanitizeAndCopyTask({
+            sourceDraftDir: taskState.acceptedNoSkillVariantDir,
+            templateId: unit.template.templateId,
+            scopeSlug: unit.scopeSlug,
+            taskName: `${plan.derivedTaskId}__no_skill`,
+            rawRoot: options.rawRoot,
+            targetRoot: options.finalRoot,
+          });
+        }
         publishedTaskIds.push(plan.derivedTaskId);
-        upsertPublishedTask(unit, buildPublishedTaskInfo(plan, materializeResult.targetTaskDir));
+        publishedVariantDirs.push({
+          derivedTaskId: plan.derivedTaskId,
+          withSkillDir: withSkillTargetDir,
+          noSkillDir: noSkillTargetDir,
+          bucketWithSkillDir: null,
+          bucketNoSkillDir: null,
+        });
+        upsertPublishedTask(unit, buildPublishedTaskInfo(plan, withSkillResult.targetTaskDir));
         await appendRunManifest({
           runId: workspace.runId,
           templateId: unit.template.templateId,
@@ -694,22 +779,56 @@ async function executeFamilyGeneration(
           phase: "publish",
           status: "completed",
           draftDir: taskState.draftDir,
-          publishedDir: materializeResult.targetTaskDir,
+          publishedDir: withSkillResult.targetTaskDir,
           metadata: {
             ...buildScopeMetadata(unit, options.runtimeEnvironment),
-            publishDisposition: materializeResult.disposition,
+            publishDisposition: withSkillResult.disposition,
+            publishedNoSkillDir: noSkillTargetDir,
+            withSkillVariantSourceDir: withSkillSourceDir,
+            noSkillVariantSourceDir: taskState.acceptedNoSkillVariantDir,
           },
         });
 
         if (taskState.skillEffectEvaluation) {
-          const bucketResult = await sanitizeAndCopyTask({
-            sourceDraftDir: taskState.draftDir,
+          const bucketRoot = buildSkillEffectBucketRoot(options.finalRoot, taskState.skillEffectEvaluation.bucket);
+          const bucketWithSkillDir = buildPublishedVariantTaskDir({
+            targetRoot: bucketRoot,
             templateId: unit.template.templateId,
             scopeSlug: unit.scopeSlug,
             taskName: plan.derivedTaskId,
-            rawRoot: options.rawRoot,
-            targetRoot: buildSkillEffectBucketRoot(options.finalRoot, taskState.skillEffectEvaluation.bucket),
+            variant: "with_skill",
           });
+          const bucketWithSkillResult = await sanitizeAndCopyTask({
+            sourceDraftDir: withSkillSourceDir,
+            templateId: unit.template.templateId,
+            scopeSlug: unit.scopeSlug,
+            taskName: `${plan.derivedTaskId}__with_skill`,
+            rawRoot: options.rawRoot,
+            targetRoot: bucketRoot,
+          });
+          let bucketNoSkillDir: string | null = null;
+          if (taskState.acceptedNoSkillVariantDir) {
+            bucketNoSkillDir = buildPublishedVariantTaskDir({
+              targetRoot: bucketRoot,
+              templateId: unit.template.templateId,
+              scopeSlug: unit.scopeSlug,
+              taskName: plan.derivedTaskId,
+              variant: "no_skill",
+            });
+            await sanitizeAndCopyTask({
+              sourceDraftDir: taskState.acceptedNoSkillVariantDir,
+              templateId: unit.template.templateId,
+              scopeSlug: unit.scopeSlug,
+              taskName: `${plan.derivedTaskId}__no_skill`,
+              rawRoot: options.rawRoot,
+              targetRoot: bucketRoot,
+            });
+          }
+          publishedVariantDirs[publishedVariantDirs.length - 1] = {
+            ...publishedVariantDirs[publishedVariantDirs.length - 1]!,
+            bucketWithSkillDir,
+            bucketNoSkillDir,
+          };
           await appendRunManifest({
             runId: workspace.runId,
             templateId: unit.template.templateId,
@@ -717,34 +836,28 @@ async function executeFamilyGeneration(
             phase: "skill-effect-bucket",
             status: "completed",
             draftDir: taskState.draftDir,
-            publishedDir: bucketResult.targetTaskDir,
+            publishedDir: bucketWithSkillResult.targetTaskDir,
             metadata: {
               ...buildScopeMetadata(unit, options.runtimeEnvironment),
               skillEffectBucket: taskState.skillEffectEvaluation.bucket,
-              publishDisposition: bucketResult.disposition,
+              publishDisposition: bucketWithSkillResult.disposition,
               bucketTarget: "final",
+              publishedNoSkillDir: bucketNoSkillDir,
             },
           });
         }
         continue;
       }
 
-      const quarantineIssues = [
+      const failedTaskIssues = [
         ...issueMessages(taskState.blockingIssues),
         ...issueMessages(taskState.staticIssues),
         ...issueMessages(taskState.runtimeIssues),
         ...issueMessages(taskState.skillEffectIssues),
       ];
-      const quarantineResult = await sanitizeAndCopyTask({
-        sourceDraftDir: taskState.draftDir,
-        templateId: unit.template.templateId,
-        scopeSlug: unit.scopeSlug,
-        taskName: plan.derivedTaskId,
-        rawRoot: options.rawRoot,
-        targetRoot: options.quarantineRoot,
-      });
-      quarantinedTaskIds.push(plan.derivedTaskId);
-      finalIssues.push(...quarantineIssues);
+      failedTaskIds.push(plan.derivedTaskId);
+      failedTaskRefs.push(buildFailedTaskRef(taskState));
+      finalIssues.push(...failedTaskIssues);
       await appendRunManifest({
         runId: workspace.runId,
         templateId: unit.template.templateId,
@@ -752,42 +865,17 @@ async function executeFamilyGeneration(
         phase: "publish",
         status: "failed",
         draftDir: taskState.draftDir,
-        publishedDir: quarantineResult.targetTaskDir,
-        issues: quarantineIssues,
+        issues: failedTaskIssues,
         metadata: {
           ...buildScopeMetadata(unit, options.runtimeEnvironment),
-          publishDisposition: quarantineResult.disposition,
+          latestRuntimeResultPath: taskState.runtimeEvidence?.resultPath,
+          latestSkillEffectResultPath: taskState.skillEffectResultPath,
+          latestSkillEffectPairRoot: taskState.skillEffectEvaluation?.pairRoot,
         },
       });
-
-      if (taskState.skillEffectEvaluation) {
-        const bucketResult = await sanitizeAndCopyTask({
-          sourceDraftDir: taskState.draftDir,
-          templateId: unit.template.templateId,
-          scopeSlug: unit.scopeSlug,
-          taskName: plan.derivedTaskId,
-          rawRoot: options.rawRoot,
-          targetRoot: buildSkillEffectBucketRoot(options.quarantineRoot, taskState.skillEffectEvaluation.bucket),
-        });
-        await appendRunManifest({
-          runId: workspace.runId,
-          templateId: unit.template.templateId,
-          derivedTaskId: plan.derivedTaskId,
-          phase: "skill-effect-bucket",
-          status: "failed",
-          draftDir: taskState.draftDir,
-          publishedDir: bucketResult.targetTaskDir,
-          metadata: {
-            ...buildScopeMetadata(unit, options.runtimeEnvironment),
-            skillEffectBucket: taskState.skillEffectEvaluation.bucket,
-            publishDisposition: bucketResult.disposition,
-            bucketTarget: "quarantine",
-          },
-        });
-      }
     }
 
-    const status: FamilyExecutionResult["status"] = quarantinedTaskIds.length === 0 ? "completed" : "failed";
+    const status: FamilyExecutionResult["status"] = failedTaskIds.length === 0 ? "completed" : "failed";
     const summary = {
       templateId: unit.template.templateId,
       templateRelativePath: unit.template.templateRelativePath,
@@ -799,27 +887,13 @@ async function executeFamilyGeneration(
       status,
       issues: uniqueStrings(finalIssues),
       publishedTaskIds,
-      quarantinedTaskIds,
+      failedTaskIds,
+      publishedVariantDirs,
+      failedTaskRefs,
       skillEffectResults,
       skillEffectBucketCounts,
       outputRoot: options.outputRoot,
       workspace,
-      finalDirs: publishedTaskIds.map((taskId) =>
-        buildMaterializedTaskDir({
-          targetRoot: options.finalRoot,
-          templateId: unit.template.templateId,
-          scopeSlug: unit.scopeSlug,
-          taskName: taskId,
-        }),
-      ),
-      quarantineDirs: quarantinedTaskIds.map((taskId) =>
-        buildMaterializedTaskDir({
-          targetRoot: options.quarantineRoot,
-          templateId: unit.template.templateId,
-          scopeSlug: unit.scopeSlug,
-          taskName: taskId,
-        }),
-      ),
     };
     await writeWorkspaceSummary(summary);
 
@@ -834,7 +908,9 @@ async function executeFamilyGeneration(
       status,
       issues: summary.issues,
       publishedTaskIds,
-      quarantinedTaskIds,
+      failedTaskIds,
+      publishedVariantDirs,
+      failedTaskRefs,
       skillEffectResults,
       skillEffectBucketCounts,
       workspace,
@@ -854,27 +930,13 @@ async function executeFamilyGeneration(
       status: "failed",
       issues: uniqueStrings([...finalIssues, message]),
       publishedTaskIds,
-      quarantinedTaskIds,
+      failedTaskIds,
+      publishedVariantDirs,
+      failedTaskRefs,
       skillEffectResults,
       skillEffectBucketCounts,
       outputRoot: options.outputRoot,
       workspace,
-      finalDirs: publishedTaskIds.map((taskId) =>
-        buildMaterializedTaskDir({
-          targetRoot: options.finalRoot,
-          templateId: unit.template.templateId,
-          scopeSlug: unit.scopeSlug,
-          taskName: taskId,
-        }),
-      ),
-      quarantineDirs: quarantinedTaskIds.map((taskId) =>
-        buildMaterializedTaskDir({
-          targetRoot: options.quarantineRoot,
-          templateId: unit.template.templateId,
-          scopeSlug: unit.scopeSlug,
-          taskName: taskId,
-        }),
-      ),
     });
     return {
       templateId: unit.template.templateId,
@@ -887,7 +949,9 @@ async function executeFamilyGeneration(
       status: "failed",
       issues: uniqueStrings([...finalIssues, message]),
       publishedTaskIds,
-      quarantinedTaskIds,
+      failedTaskIds,
+      publishedVariantDirs,
+      failedTaskRefs,
       skillEffectResults,
       skillEffectBucketCounts,
       workspace,
@@ -990,7 +1054,6 @@ async function ensureRoots(options: ExecuteFamilyOptions): Promise<void> {
   await ensureDir(options.outputRoot);
   await ensureDir(options.rawRoot);
   await ensureDir(options.finalRoot);
-  await ensureDir(options.quarantineRoot);
 }
 
 async function main(): Promise<void> {
@@ -1023,7 +1086,6 @@ async function main(): Promise<void> {
     outputRoot,
     rawRoot: buildRawRoot(outputRoot),
     finalRoot: buildFinalRoot(outputRoot),
-    quarantineRoot: buildQuarantineRoot(outputRoot),
     runtimeEnvironment,
     maxRepairRounds: getNumberOption(options, "max-repair-rounds", 2),
     skillEffectEnabled,
@@ -1058,7 +1120,6 @@ async function main(): Promise<void> {
           outputRoot: executeOptions.outputRoot,
           rawRoot: executeOptions.rawRoot,
           finalRoot: executeOptions.finalRoot,
-          quarantineRoot: executeOptions.quarantineRoot,
         },
         null,
         2,
@@ -1093,14 +1154,13 @@ async function main(): Promise<void> {
     failedCount: results.filter((result) => result.status === "failed").length,
     skippedCount: loaded.skippedCount,
     publishedTaskCount: results.reduce((sum, result) => sum + result.publishedTaskIds.length, 0),
-    quarantinedTaskCount: results.reduce((sum, result) => sum + result.quarantinedTaskIds.length, 0),
+    failedTaskCount: results.reduce((sum, result) => sum + result.failedTaskIds.length, 0),
     skillEffectEnabled: executeOptions.skillEffectEnabled,
     skillEffectModel: executeOptions.skillEffectModel,
     skillEffectBucketCounts,
     outputRoot: executeOptions.outputRoot,
     rawRoot: executeOptions.rawRoot,
     finalRoot: executeOptions.finalRoot,
-    quarantineRoot: executeOptions.quarantineRoot,
     results,
   };
   console.log(JSON.stringify(summary, null, 2));

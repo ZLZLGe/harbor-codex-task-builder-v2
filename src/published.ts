@@ -21,6 +21,27 @@ function comparePublishedTasks(left: PublishedTaskInfo, right: PublishedTaskInfo
   return left.roleOrdinal - right.roleOrdinal;
 }
 
+function parsePublishedVariantDirName(
+  value: string,
+): { derivedTaskId: string; taskRole: "similar" | "transfer"; roleOrdinal: number } | null {
+  const match = /^(similar|transfer)([1-9]\d*)__with_skill$/.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+
+  const derivedTaskId = `${match[1]}${match[2]}`;
+  const parsed = parseCanonicalTaskName(derivedTaskId);
+  if (!parsed) {
+    return null;
+  }
+
+  return {
+    derivedTaskId,
+    taskRole: parsed.taskRole,
+    roleOrdinal: parsed.roleOrdinal,
+  };
+}
+
 export async function inspectPublishedFamily(
   unit: Pick<GenerationUnit, "template" | "scopeSlug" | "similarCount" | "transferCount">,
   finalRoot: string,
@@ -37,14 +58,14 @@ export async function inspectPublishedFamily(
         continue;
       }
 
-      const parsed = parseCanonicalTaskName(entry.name);
+      const parsed = parsePublishedVariantDirName(entry.name);
       if (!parsed) {
         continue;
       }
 
       const taskDir = path.join(finalFamilyDir, entry.name);
       const taskInfo: PublishedTaskInfo = {
-        derivedTaskId: entry.name,
+        derivedTaskId: parsed.derivedTaskId,
         taskRole: parsed.taskRole,
         roleOrdinal: parsed.roleOrdinal,
         taskDir,
@@ -98,9 +119,10 @@ export function selectExecutableUnits<T extends Pick<GenerationUnit, "pendingSim
   executableUnits: T[];
   skippedCount: number;
 } {
-  const executableUnits = units.filter((unit) => hasPendingTasks(unit));
+  const executableCandidates = units.filter((unit) => hasPendingTasks(unit));
+  const executableUnits = limit > 0 ? executableCandidates.slice(0, limit) : executableCandidates;
   return {
-    executableUnits: limit > 0 ? executableUnits.slice(0, limit) : executableUnits,
+    executableUnits,
     skippedCount: units.length - executableUnits.length,
   };
 }

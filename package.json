@@ -6,6 +6,7 @@
     "inventory": "node --import tsx src/cli.ts inventory",
     "generate-family": "node --import tsx src/cli.ts generate-family",
     "check": "tsc --noEmit",
+    "test:skill-effect": "node --import tsx tests/skill_effect.test.ts",
     "test:prompts": "node --import tsx tests/prompts.test.ts",
     "test:validate": "node --import tsx tests/validate.test.ts"
   },
