@@ -1,5 +1,6 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { extractHarborTrialMetrics, type HarborTrialMetrics } from "./harbor_metrics.js";
 import type { DerivedTaskPlan } from "./schema.js";
 import type { FamilyWorkspace } from "./workspace.js";
 import type { RuntimeEnvironment, RuntimeFailureKind, RuntimePreflightResult, ValidationIssue } from "./validate.js";
@@ -43,6 +44,7 @@ export type AgentRunEvidence = {
   rewardPath?: string;
   artifactManifestPath?: string;
   trajectoryPath?: string;
+  metrics?: HarborTrialMetrics;
   command: string[];
   reward?: number | null;
   summary: string;
@@ -366,6 +368,8 @@ async function runAgentVariant(options: {
         : rewardTxtPath ?? rewardJsonPath;
   const artifactManifestPath = trialDir ? path.join(trialDir, "artifacts", "manifest.json") : undefined;
   const trajectoryPath = trialDir ? path.join(trialDir, "agent", "trajectory.json") : undefined;
+  const stableTrajectoryPath = trajectoryPath && (await pathExists(trajectoryPath)) ? trajectoryPath : undefined;
+  const metrics = await extractHarborTrialMetrics(stableResultPath, stableTrajectoryPath);
 
   const evidence: AgentRunEvidence = {
     ...baseEvidence,
@@ -377,7 +381,8 @@ async function runAgentVariant(options: {
     verifierStdoutPath,
     rewardPath,
     artifactManifestPath,
-    trajectoryPath: trajectoryPath && (await pathExists(trajectoryPath)) ? trajectoryPath : undefined,
+    trajectoryPath: stableTrajectoryPath,
+    metrics,
     summary,
   };
 

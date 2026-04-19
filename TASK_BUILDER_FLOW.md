@@ -564,7 +564,6 @@ workspace `artifacts/` 中常见产物包括：
 - `<task>.review.round-<n>.raw.json`
 - `<task>.runtime.cycle-<n>.json`
 - `<task>.runtime.cycle-<n>.attempt-<m>.json`
-- `<task>.skill-effect.cycle-<n>.json`
 - `<task>.skill-effect.cycle-<n>.attempt-<m>.json`
 - `<task>.repair.<n>.json`
 - `<task>.repair.<n>.raw.json`

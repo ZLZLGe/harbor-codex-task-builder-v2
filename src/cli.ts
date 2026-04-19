@@ -23,6 +23,7 @@ import {
   type SkillEffectBucket,
   type SkillEffectEvaluationResult,
 } from "./skill_effect.js";
+import { writeSkillEffectResultArtifact } from "./skill_effect_artifacts.js";
 import {
   DEFAULT_OUTPUT_ROOT,
   TEMPLATE_ROOT,
@@ -675,12 +676,13 @@ async function executeFamilyGeneration(
         taskState.acceptedNoSkillVariantDir = skillEffectResult.repairRequired
           ? undefined
           : skillEffectResult.noSkill.evidence.variantTaskDir;
-        taskState.skillEffectResultPath = path.join(
-          workspace.artifactsDir,
-          `${plan.derivedTaskId}.skill-effect.cycle-${cycle}.attempt-${skillEffectAttemptIndex}.json`,
-        );
-        await writeJson(taskState.skillEffectResultPath, skillEffectResult);
-        await writeJson(path.join(workspace.artifactsDir, `${plan.derivedTaskId}.skill-effect.cycle-${cycle}.json`), skillEffectResult);
+        taskState.skillEffectResultPath = await writeSkillEffectResultArtifact({
+          artifactsDir: workspace.artifactsDir,
+          derivedTaskId: plan.derivedTaskId,
+          cycle,
+          attemptIndex: skillEffectAttemptIndex,
+          result: skillEffectResult,
+        });
         await appendRunManifest({
           runId: workspace.runId,
           templateId: unit.template.templateId,

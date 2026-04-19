@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   buildSkillEffectBucket,
   buildSkillEffectIssues,
   isAcceptedSkillEffectBucket,
+  type AgentRunEvidence,
   type AgentRunResult,
   type SkillEffectEvaluationResult,
 } from "../src/skill_effect.js";
+import { writeSkillEffectResultArtifact } from "../src/skill_effect_artifacts.js";
+import { pathExists, readText } from "../src/utils.js";
 
 function makeRunResult(
   variant: "with_skill" | "no_skill",
@@ -80,4 +86,51 @@ function makeEvaluation(
   const evaluation = makeEvaluation("invalid_fail", "pass");
   assert.equal(evaluation.bucket, "with_skill_fail__no_skill_pass");
   assert.equal(evaluation.repairRequired, true);
+}
+
+{
+  const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "skill-effect-artifacts-"));
+  const evaluation = makeEvaluation("pass", "valid_reward_fail");
+  const withSkillMetrics: NonNullable<AgentRunEvidence["metrics"]> = {
+    totalDurationSec: 120,
+    environmentSetupSec: 10,
+    agentSetupSec: 5,
+    agentExecutionSec: 90,
+    verifierSec: 15,
+    totalTokens: 1234,
+  };
+  const noSkillMetrics: NonNullable<AgentRunEvidence["metrics"]> = {
+    totalDurationSec: 80,
+    environmentSetupSec: 8,
+    agentSetupSec: 4,
+    agentExecutionSec: 60,
+    verifierSec: 8,
+    totalTokens: 567,
+  };
+  evaluation.withSkill.evidence.metrics = withSkillMetrics;
+  evaluation.noSkill.evidence.metrics = noSkillMetrics;
+  const resultPath = await writeSkillEffectResultArtifact({
+    artifactsDir,
+    derivedTaskId: "similar1",
+    cycle: 3,
+    attemptIndex: 2,
+    result: evaluation,
+  });
+
+  assert.equal(
+    resultPath,
+    path.join(artifactsDir, "similar1.skill-effect.cycle-3.attempt-2.json"),
+  );
+  assert.equal(await pathExists(resultPath), true);
+  assert.equal(
+    await pathExists(path.join(artifactsDir, "similar1.skill-effect.cycle-3.json")),
+    false,
+  );
+  const saved = JSON.parse(await readText(resultPath)) as SkillEffectEvaluationResult;
+  assert.deepEqual(saved.withSkill.evidence.metrics, withSkillMetrics);
+  assert.deepEqual(saved.noSkill.evidence.metrics, noSkillMetrics);
+  assert.deepEqual(
+    saved,
+    JSON.parse(JSON.stringify(evaluation)) as SkillEffectEvaluationResult,
+  );
 }
