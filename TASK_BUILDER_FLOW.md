@@ -450,6 +450,15 @@ runtime 通过标准：
   - 从 `environment/Dockerfile` 中删除 `COPY skills ...` 相关行
   - 再基于 `variants/no_skill/` 运行 Codex
 
+这里的执行顺序要注意：
+
+- variant 准备阶段仍然是顺序的
+  - 先准备 `variants/with_skill`
+  - 再从它派生 `variants/no_skill`
+- 两个 variant 准备完成后，`with_skill` / `no_skill` 会默认并行执行
+- 因此 task 主流程仍然是串行的，但单个 task 进入 `skill-effect` 阶段后，会同时占用两个 Harbor/E2B trial
+- `--concurrency` 仍然只表示 family unit 级并发，不会吸收这两个 variant 的内部并发预算
+
 当前 bucket 有五种：
 
 - `with_skill_pass__no_skill_fail`

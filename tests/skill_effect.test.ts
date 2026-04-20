@@ -6,6 +6,7 @@ import {
   buildSkillEffectBucket,
   buildSkillEffectIssues,
   isAcceptedSkillEffectBucket,
+  runSkillEffectEvaluation,
   type AgentRunEvidence,
   type AgentRunResult,
   type SkillEffectEvaluationResult,
@@ -37,6 +38,26 @@ function makeRunResult(
       summary: comparisonReason,
     },
   };
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function nextTick(): Promise<void> {
+  return new Promise((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 function makeEvaluation(
@@ -133,4 +154,139 @@ function makeEvaluation(
     saved,
     JSON.parse(JSON.stringify(evaluation)) as SkillEffectEvaluationResult,
   );
+}
+
+{
+  const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "skill-effect-parallel-"));
+  const events: string[] = [];
+  const withSkillDeferred = createDeferred<AgentRunResult>();
+  const noSkillDeferred = createDeferred<AgentRunResult>();
+  const workspace = {
+    artifactsDir,
+    runId: "run-parallel",
+  } as const;
+  const plan = {
+    derivedTaskId: "similar1",
+  } as const;
+
+  const evaluationPromise = runSkillEffectEvaluation({
+    workspace: workspace as never,
+    plan: plan as never,
+    runtimeEnvironment: "e2b",
+    cycle: 2,
+    attemptIndex: 1,
+    draftTaskDir: "/tmp/draft",
+    modelName: "openai/gpt-5.4",
+    apiKey: "sk-test",
+    deps: {
+      prepareWithSkillVariant: async ({ targetTaskDir }) => {
+        events.push("prepare_with_skill");
+        return { targetTaskDir };
+      },
+      prepareNoSkillVariant: async ({ targetTaskDir }) => {
+        events.push("prepare_no_skill");
+        return { targetTaskDir, removedCopyLines: 1 };
+      },
+      runAgentVariant: async ({ variant }) => {
+        events.push(`start_${variant}`);
+        return variant === "with_skill" ? withSkillDeferred.promise : noSkillDeferred.promise;
+      },
+    },
+  });
+
+  let settled = false;
+  void evaluationPromise.finally(() => {
+    settled = true;
+  });
+
+  await nextTick();
+  assert.deepEqual(events, [
+    "prepare_with_skill",
+    "prepare_no_skill",
+    "start_with_skill",
+    "start_no_skill",
+  ]);
+
+  withSkillDeferred.resolve(makeRunResult("with_skill", "pass", "with:pass"));
+  await nextTick();
+  assert.equal(settled, false);
+
+  noSkillDeferred.resolve(makeRunResult("no_skill", "valid_reward_fail", "no:valid_reward_fail"));
+  const evaluation = await evaluationPromise;
+  assert.equal(evaluation.withSkill.variant, "with_skill");
+  assert.equal(evaluation.noSkill.variant, "no_skill");
+  assert.equal(evaluation.bucket, "with_skill_pass__no_skill_fail");
+  assert.equal(evaluation.repairRequired, false);
+}
+
+{
+  const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "skill-effect-parallel-reject-"));
+  const events: string[] = [];
+  const withSkillDeferred = createDeferred<AgentRunResult>();
+  const noSkillDeferred = createDeferred<AgentRunResult>();
+  const workspace = {
+    artifactsDir,
+    runId: "run-reject",
+  } as const;
+  const plan = {
+    derivedTaskId: "similar1",
+  } as const;
+  const withSkillError = new Error("with_skill failed");
+
+  const evaluationPromise = runSkillEffectEvaluation({
+    workspace: workspace as never,
+    plan: plan as never,
+    runtimeEnvironment: "e2b",
+    cycle: 3,
+    attemptIndex: 1,
+    draftTaskDir: "/tmp/draft",
+    modelName: "openai/gpt-5.4",
+    apiKey: "sk-test",
+    deps: {
+      prepareWithSkillVariant: async ({ targetTaskDir }) => {
+        events.push("prepare_with_skill");
+        return { targetTaskDir };
+      },
+      prepareNoSkillVariant: async ({ targetTaskDir }) => {
+        events.push("prepare_no_skill");
+        return { targetTaskDir, removedCopyLines: 1 };
+      },
+      runAgentVariant: async ({ variant }) => {
+        events.push(`start_${variant}`);
+        return variant === "with_skill" ? withSkillDeferred.promise : noSkillDeferred.promise;
+      },
+    },
+  });
+
+  let state: "pending" | "fulfilled" | "rejected" = "pending";
+  let rejection: unknown = undefined;
+  void evaluationPromise.then(
+    () => {
+      state = "fulfilled";
+    },
+    (error) => {
+      state = "rejected";
+      rejection = error;
+    },
+  );
+
+  await nextTick();
+  assert.deepEqual(events, [
+    "prepare_with_skill",
+    "prepare_no_skill",
+    "start_with_skill",
+    "start_no_skill",
+  ]);
+
+  withSkillDeferred.reject(withSkillError);
+  await nextTick();
+  assert.equal(state, "pending");
+
+  noSkillDeferred.resolve(makeRunResult("no_skill", "pass", "no:pass"));
+  await assert.rejects(evaluationPromise, (error) => {
+    assert.equal(error, withSkillError);
+    return true;
+  });
+  assert.equal(state, "rejected");
+  assert.equal(rejection, withSkillError);
 }

@@ -75,6 +75,18 @@ type RuntimeLogEntry = {
   path: string;
 };
 
+type SkillEffectDeps = {
+  prepareWithSkillVariant: typeof prepareWithSkillVariant;
+  prepareNoSkillVariant: typeof prepareNoSkillVariant;
+  runAgentVariant: typeof runAgentVariant;
+};
+
+const DEFAULT_SKILL_EFFECT_DEPS: SkillEffectDeps = {
+  prepareWithSkillVariant,
+  prepareNoSkillVariant,
+  runAgentVariant,
+};
+
 const SKILL_COPY_RE = /^\s*COPY(?:\s+--[A-Za-z0-9_-]+(?:=[^\s]+)?)*\s+(?:\.\/*)?skills\/?\s+/i;
 
 function compactOutputSummary(text: string): string {
@@ -612,24 +624,29 @@ export async function runSkillEffectEvaluation(args: {
   apiKey: string;
   baseUrl?: string;
   env?: NodeJS.ProcessEnv;
+  deps?: Partial<SkillEffectDeps>;
 }): Promise<SkillEffectEvaluationResult> {
+  const deps: SkillEffectDeps = {
+    ...DEFAULT_SKILL_EFFECT_DEPS,
+    ...args.deps,
+  };
   const pairRoot = buildVariantLogRoot(args.workspace, args.plan, args.cycle, args.attemptIndex);
   const withSkillLogsDir = path.join(pairRoot, "with_skill");
   const noSkillLogsDir = path.join(pairRoot, "no_skill");
   const withSkillTaskDir = path.join(pairRoot, "variants", "with_skill");
   const noSkillTaskDir = path.join(pairRoot, "variants", "no_skill");
 
-  await prepareWithSkillVariant({
+  await deps.prepareWithSkillVariant({
     sourceTaskDir: args.draftTaskDir,
     targetTaskDir: withSkillTaskDir,
   });
 
-  await prepareNoSkillVariant({
+  await deps.prepareNoSkillVariant({
     sourceTaskDir: withSkillTaskDir,
     targetTaskDir: noSkillTaskDir,
   });
 
-  const withSkill = await runAgentVariant({
+  const withSkillPromise = deps.runAgentVariant({
     variant: "with_skill",
     workspace: args.workspace,
     plan: args.plan,
@@ -642,7 +659,7 @@ export async function runSkillEffectEvaluation(args: {
     env: args.env,
   });
 
-  const noSkill = await runAgentVariant({
+  const noSkillPromise = deps.runAgentVariant({
     variant: "no_skill",
     workspace: args.workspace,
     plan: args.plan,
@@ -654,6 +671,17 @@ export async function runSkillEffectEvaluation(args: {
     baseUrl: args.baseUrl,
     env: args.env,
   });
+
+  const [withSkillSettled, noSkillSettled] = await Promise.allSettled([withSkillPromise, noSkillPromise]);
+  if (withSkillSettled.status === "rejected") {
+    throw withSkillSettled.reason;
+  }
+  if (noSkillSettled.status === "rejected") {
+    throw noSkillSettled.reason;
+  }
+
+  const withSkill = withSkillSettled.value;
+  const noSkill = noSkillSettled.value;
 
   const bucket = buildSkillEffectBucket(withSkill.comparisonStatus, noSkill.comparisonStatus);
   return {

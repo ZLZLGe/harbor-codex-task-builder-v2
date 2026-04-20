@@ -163,6 +163,7 @@ final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__
 - 改为 task 级串行执行
   - 固定顺序是 `similar1..N` 先于 `transfer1..N`
   - 每个 task 单独经历 `write -> blocking review -> static validate -> runtime -> skill-effect -> repair`
+  - `skill-effect` 内部会在变体准备完成后默认并行运行 `with_skill` / `no_skill`
 - 不再有独立 family reviewer
   - 去重改为 writer 主动避重 + 单任务 blocking reviewer 兜底
   - 去重范围只包含 `final-root` 下已经发布的 `*__with_skill` sibling / 历史任务
@@ -183,6 +184,12 @@ skill-effect gate 现在进一步区分：
   - `no_skill` 是异常失败，必须继续 repair，不能发布
 - 其他 bucket
   - 一律继续 repair，直到达到 PF 或耗尽 repair 轮数
+
+资源语义补充：
+
+- `--concurrency` 仍然只控制同时处理多少个 family unit
+- 单个 task 进入 `skill-effect` 阶段后，会默认同时起两个 Harbor/E2B trial
+- 因此 `skill-effect` 阶段的峰值活跃 trial 数最多可到 `2 * --concurrency`
 
 重复运行同一条命令时：
 
