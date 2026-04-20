@@ -30,6 +30,7 @@ import {
   buildFinalRoot,
   buildRawRoot,
   ensureDir,
+  parseNonNegativeInteger,
   writeJson,
 } from "./utils.js";
 import { createFamilyWorkspace, prepareDraftSkeleton, type FamilyWorkspace } from "./workspace.js";
@@ -124,6 +125,7 @@ type ExecuteFamilyOptions = {
   finalRoot: string;
   runtimeEnvironment: RuntimeEnvironment;
   maxRepairRounds: number;
+  codexRunRetries: number;
   skillEffectEnabled: boolean;
   skillEffectModel: string;
   skillEffectApiKey: string;
@@ -189,6 +191,10 @@ function getNumberOption(options: Options, key: string, fallback: number): numbe
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getNonNegativeIntegerOption(options: Options, key: string, fallback: number): number {
+  return parseNonNegativeInteger(getStringOption(options, key), `--${key}`, fallback);
 }
 
 function getFlagOption(options: Options, key: string): boolean {
@@ -416,7 +422,9 @@ async function executeFamilyGeneration(
   const workspace = await createFamilyWorkspace(unit, {
     rawRoot: options.rawRoot,
   });
-  const codex = new CodexTaskBuilderClient();
+  const codex = new CodexTaskBuilderClient({
+    codexRunRetries: options.codexRunRetries,
+  });
   const appendRunManifest = (entry: Omit<ManifestEntry, "timestamp">) => appendManifest(entry, options.outputRoot);
   const writeWorkspaceSummary = (summary: unknown) => writeRunSummary(workspace.runId, summary, options.outputRoot);
   const publishedTaskIds: string[] = [];
@@ -1090,6 +1098,7 @@ async function main(): Promise<void> {
     finalRoot: buildFinalRoot(outputRoot),
     runtimeEnvironment,
     maxRepairRounds: getNumberOption(options, "max-repair-rounds", 2),
+    codexRunRetries: getNonNegativeIntegerOption(options, "codex-run-retries", 3),
     skillEffectEnabled,
     skillEffectModel,
     skillEffectApiKey: process.env.OPENAI_API_KEY?.trim() ?? "",

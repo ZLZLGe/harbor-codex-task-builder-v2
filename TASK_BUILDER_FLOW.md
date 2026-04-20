@@ -184,6 +184,11 @@ CLI 现在只保留两类命令：
 - `--limit`
   - 在完成 unit 发现、published-state 判断并筛出 executable units 后，最多执行前 N 个 unit
   - 这是 unit 级限制，不是单个 family 内的 task 数量限制，也不是 similar / transfer 数量限制
+- `--codex-run-retries`
+  - 控制 builder 侧 planner / writer / review / repair 这四类 Codex `thread.run(...)` 调用在首次失败后最多额外重试几次
+  - 默认值是 `3`
+  - `0` 表示关闭自动重试
+  - 只影响本地 builder 进程，不影响 Harbor / E2B trial 内部重试行为
 
 ## 6. 完整造任务流程
 

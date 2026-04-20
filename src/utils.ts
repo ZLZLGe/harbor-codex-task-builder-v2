@@ -106,6 +106,18 @@ export function parseJsonWithFallback<T>(raw: string): T {
   }
 }
 
+export function parseNonNegativeInteger(value: string | undefined, optionLabel: string, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${optionLabel} 必须是 >= 0 的整数`);
+  }
+  return parsed;
+}
+
 export async function runCommand(
   command: string,
   args: string[],

@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { Codex, type Thread, type ThreadOptions } from "@openai/codex-sdk";
+import { Codex, type ThreadOptions, type TurnOptions } from "@openai/codex-sdk";
 import { z } from "zod";
 import type { GenerationUnit } from "./discovery.js";
 import type {
@@ -35,6 +35,20 @@ type StructuredRunResult<T> = {
   data: T;
   threadId: string | null;
   raw: string;
+};
+
+type CodexThreadRunner = {
+  id: string | null;
+  run: (input: string, turnOptions?: TurnOptions) => Promise<{
+    items: unknown[];
+    finalResponse: string;
+    usage: unknown | null;
+  }>;
+};
+
+type CodexThreadFactory = {
+  startThread: (options?: ThreadOptions) => CodexThreadRunner;
+  resumeThread: (id: string, options?: ThreadOptions) => CodexThreadRunner;
 };
 
 const writerSummaryPartialSchema = z
@@ -346,13 +360,25 @@ async function inferWriterFilesWritten(
 }
 
 export class CodexTaskBuilderClient {
-  private readonly codex: Codex;
+  private readonly codex: CodexThreadFactory;
   private readonly threadBaseOptions: ThreadOptions;
+  private readonly codexRunRetries: number;
+  private readonly retryBaseDelayMs: number;
+  private readonly sleep: (ms: number) => Promise<void>;
 
-  constructor() {
-    this.codex = new Codex({
-      codexPathOverride: process.env.CODEX_PATH,
-    });
+  constructor(
+    options: {
+      codexRunRetries?: number;
+      retryBaseDelayMs?: number;
+      sleep?: (ms: number) => Promise<void>;
+      codex?: CodexThreadFactory;
+    } = {},
+  ) {
+    this.codex =
+      options.codex ??
+      new Codex({
+        codexPathOverride: process.env.CODEX_PATH,
+      });
 
     const sandboxMode =
       process.env.CODEX_TASK_BUILDER_SANDBOX_MODE === "workspace-write" ? "workspace-write" : "danger-full-access";
@@ -366,9 +392,18 @@ export class CodexTaskBuilderClient {
       networkAccessEnabled,
       modelReasoningEffort: "medium",
     };
+
+    this.codexRunRetries = options.codexRunRetries ?? 0;
+    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 2_000;
+    this.sleep =
+      options.sleep ??
+      ((ms: number) =>
+        new Promise((resolve) => {
+          setTimeout(resolve, ms);
+        }));
   }
 
-  private makeThread(workingDirectory: string, threadId?: string | null): Thread {
+  private makeThread(workingDirectory: string, threadId?: string | null): CodexThreadRunner {
     const options: ThreadOptions = {
       ...this.threadBaseOptions,
       workingDirectory,
@@ -376,15 +411,49 @@ export class CodexTaskBuilderClient {
     return threadId ? this.codex.resumeThread(threadId, options) : this.codex.startThread(options);
   }
 
+  private async runThreadWithRetries<T>(
+    label: string,
+    createThread: () => CodexThreadRunner,
+    execute: (thread: CodexThreadRunner) => Promise<T>,
+  ): Promise<{ result: T; threadId: string | null }> {
+    let retryCount = 0;
+
+    while (true) {
+      const thread = createThread();
+      try {
+        const result = await execute(thread);
+        return {
+          result,
+          threadId: thread.id,
+        };
+      } catch (error) {
+        if (retryCount >= this.codexRunRetries) {
+          throw error;
+        }
+
+        retryCount += 1;
+        const delayMs = this.retryBaseDelayMs * 2 ** (retryCount - 1);
+        console.warn(
+          `[codex-retry:${label}] 第 ${retryCount}/${this.codexRunRetries} 次重试，${delayMs / 1000}s 后重试：${compactErrorMessage(error)}`,
+        );
+        await this.sleep(delayMs);
+      }
+    }
+  }
+
   async planFamily(unit: GenerationUnit, workspace: FamilyWorkspace): Promise<StructuredRunResult<FamilyPlan>> {
-    const thread = this.makeThread(workspace.rootDir);
-    const turn = await thread.run(buildFamilyPlannerPrompt(unit), {
-      outputSchema: familyPlanJsonSchema,
-    });
+    const { result: turn, threadId } = await this.runThreadWithRetries(
+      "plan-family",
+      () => this.makeThread(workspace.rootDir),
+      async (thread) =>
+        thread.run(buildFamilyPlannerPrompt(unit), {
+          outputSchema: familyPlanJsonSchema,
+        }),
+    );
     const parsed = familyPlanSchema.parse(parseJsonWithFallback<FamilyPlan>(turn.finalResponse));
     return {
       data: parsed,
-      threadId: thread.id,
+      threadId,
       raw: turn.finalResponse,
     };
   }
@@ -394,10 +463,14 @@ export class CodexTaskBuilderClient {
     workspace: FamilyWorkspace,
     plan: DerivedTaskPlan,
   ): Promise<StructuredRunResult<WriterSummary>> {
-    const thread = this.makeThread(workspace.rootDir);
-    const turn = await thread.run(buildTaskWriterPrompt(unit, plan), {
-      outputSchema: writerSummaryJsonSchema,
-    });
+    const { result: turn, threadId } = await this.runThreadWithRetries(
+      "write-task",
+      () => this.makeThread(workspace.rootDir),
+      async (thread) =>
+        thread.run(buildTaskWriterPrompt(unit, plan), {
+          outputSchema: writerSummaryJsonSchema,
+        }),
+    );
 
     let parsedValue: unknown | null = null;
     let parseFailure: string | null = null;
@@ -412,7 +485,7 @@ export class CodexTaskBuilderClient {
       if (strict.success) {
         return {
           data: strict.data,
-          threadId: thread.id,
+          threadId,
           raw: turn.finalResponse,
         };
       }
@@ -443,7 +516,7 @@ export class CodexTaskBuilderClient {
         filesWritten,
         summary,
       },
-      threadId: thread.id,
+      threadId,
       raw: turn.finalResponse,
     };
   }
@@ -454,14 +527,18 @@ export class CodexTaskBuilderClient {
     familyPlan: FamilyPlan,
     plan: DerivedTaskPlan,
   ): Promise<StructuredRunResult<BlockingReviewResult>> {
-    const thread = this.makeThread(workspace.rootDir);
-    const turn = await thread.run(buildBlockingReviewerPrompt(unit, familyPlan, plan), {
-      outputSchema: blockingReviewResultJsonSchema,
-    });
+    const { result: turn, threadId } = await this.runThreadWithRetries(
+      "review-task-blocking",
+      () => this.makeThread(workspace.rootDir),
+      async (thread) =>
+        thread.run(buildBlockingReviewerPrompt(unit, familyPlan, plan), {
+          outputSchema: blockingReviewResultJsonSchema,
+        }),
+    );
     const parsed = normalizeBlockingReviewResultFromRaw([plan], turn.finalResponse);
     return {
       data: parsed,
-      threadId: thread.id,
+      threadId,
       raw: turn.finalResponse,
     };
   }
@@ -496,44 +573,48 @@ export class CodexTaskBuilderClient {
     noSkillTrajectoryPath?: string;
     threadId?: string | null;
   }): Promise<StructuredRunResult<RepairTurnResult>> {
-    const thread = this.makeThread(args.workspace.rootDir, args.threadId);
-    const turn = await thread.run(
-      buildRepairPrompt({
-        unit: args.unit,
-        plan: args.plan,
-        blockingIssues: args.blockingIssues,
-        staticIssues: args.staticIssues,
-        runtimeIssues: args.runtimeIssues,
-        skillEffectIssues: args.skillEffectIssues,
-        runtimeDir: args.runtimeDir,
-        runtimeLogRoot: args.runtimeLogRoot,
-        runtimeLogIndexPath: args.runtimeLogIndexPath,
-        runtimeLogPath: args.runtimeLogPath,
-        runtimeResultPath: args.runtimeResultPath,
-        jobLogPath: args.jobLogPath,
-        trialLogPath: args.trialLogPath,
-        verifierStdoutPath: args.verifierStdoutPath,
-        rewardPath: args.rewardPath,
-        artifactManifestPath: args.artifactManifestPath,
-        skillEffectResultPath: args.skillEffectResultPath,
-        skillEffectBucket: args.skillEffectBucket,
-        withSkillLogRoot: args.withSkillLogRoot,
-        withSkillResultPath: args.withSkillResultPath,
-        withSkillRewardPath: args.withSkillRewardPath,
-        withSkillTrajectoryPath: args.withSkillTrajectoryPath,
-        noSkillLogRoot: args.noSkillLogRoot,
-        noSkillResultPath: args.noSkillResultPath,
-        noSkillRewardPath: args.noSkillRewardPath,
-        noSkillTrajectoryPath: args.noSkillTrajectoryPath,
-      }),
-      {
-        outputSchema: repairTurnResultJsonSchema,
-      },
+    const { result: turn, threadId } = await this.runThreadWithRetries(
+      "repair-task",
+      () => this.makeThread(args.workspace.rootDir, args.threadId),
+      async (thread) =>
+        thread.run(
+          buildRepairPrompt({
+            unit: args.unit,
+            plan: args.plan,
+            blockingIssues: args.blockingIssues,
+            staticIssues: args.staticIssues,
+            runtimeIssues: args.runtimeIssues,
+            skillEffectIssues: args.skillEffectIssues,
+            runtimeDir: args.runtimeDir,
+            runtimeLogRoot: args.runtimeLogRoot,
+            runtimeLogIndexPath: args.runtimeLogIndexPath,
+            runtimeLogPath: args.runtimeLogPath,
+            runtimeResultPath: args.runtimeResultPath,
+            jobLogPath: args.jobLogPath,
+            trialLogPath: args.trialLogPath,
+            verifierStdoutPath: args.verifierStdoutPath,
+            rewardPath: args.rewardPath,
+            artifactManifestPath: args.artifactManifestPath,
+            skillEffectResultPath: args.skillEffectResultPath,
+            skillEffectBucket: args.skillEffectBucket,
+            withSkillLogRoot: args.withSkillLogRoot,
+            withSkillResultPath: args.withSkillResultPath,
+            withSkillRewardPath: args.withSkillRewardPath,
+            withSkillTrajectoryPath: args.withSkillTrajectoryPath,
+            noSkillLogRoot: args.noSkillLogRoot,
+            noSkillResultPath: args.noSkillResultPath,
+            noSkillRewardPath: args.noSkillRewardPath,
+            noSkillTrajectoryPath: args.noSkillTrajectoryPath,
+          }),
+          {
+            outputSchema: repairTurnResultJsonSchema,
+          },
+        ),
     );
     const parsed = normalizeRepairTurnResultFromRaw(turn.finalResponse);
     return {
       data: parsed,
-      threadId: thread.id,
+      threadId,
       raw: turn.finalResponse,
     };
   }

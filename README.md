@@ -66,6 +66,7 @@ npm run generate-family -- \
   --transfer-count 1 \
   --output-root /Users/leviviya/Documents/Harbor/.local-workspace/codex_task_builder_v2_debugging \
   --concurrency 1 \
+  --codex-run-retries 3 \
   --max-repair-rounds 2
 ```
 
@@ -84,6 +85,11 @@ npm run generate-family -- \
 - `--output-root`
   - 唯一输出根目录参数
 - `--concurrency`
+- `--codex-run-retries`
+  - 可选，控制 builder 侧每次 Codex `thread.run(...)` 调用在首次失败后最多额外重试几次
+  - 默认值是 `3`
+  - `0` 表示关闭自动重试
+  - 只作用于 planner / writer / review / repair 这些本地 builder 调用，不影响 Harbor / E2B trial 内部行为
 - `--max-repair-rounds`
 - `--limit`
   - 可选，按 unit 限制本次实际执行数量
