@@ -12,10 +12,8 @@ import {
 import { buildPublishedVariantTaskDir, sanitizeAndCopyTask } from "../src/materialize.js";
 import { inspectPublishedFamily, selectExecutableUnits } from "../src/published.js";
 import {
-  flattenFamilyPlan,
   type BlockingReviewResult,
   type DerivedTaskPlan,
-  type FamilyPlan,
 } from "../src/schema.js";
 import {
   buildSkillEffectBucket,
@@ -35,9 +33,13 @@ import {
   writeText,
 } from "../src/utils.js";
 import {
+  createFamilyWorkspace,
+  createTaskAttemptWorkspace,
+  prepareAttemptDraftSkeleton,
+} from "../src/workspace.js";
+import {
   validateBlockingReviewResult,
   validateDraftStatic,
-  validateFamilyPlan,
   validateTaskPlans,
 } from "../src/validate.js";
 
@@ -116,7 +118,6 @@ const plan: DerivedTaskPlan = {
   roleOrdinal: 1,
   title: "Transfer 1",
   goal: "Repair the failing service.",
-  primaryOutputFile: "incident-summary.json",
   difficulty: "hard",
   category: "debugging",
   skillBenefitRationale: "Requires the injected debugging workflow.",
@@ -135,6 +136,7 @@ async function makeDraftFixture(
     dockerfile?: string;
     mutateInjectedSkill?: boolean;
     visibleSkillOverride?: SkillInfo[];
+    includeLegacyPrimaryOutputFile?: boolean;
   } = {},
 ): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-builder-draft-"));
@@ -154,6 +156,9 @@ async function makeDraftFixture(
   await ensureDir(path.join(root, "solution"));
   await ensureDir(path.join(root, "tests"));
   await writeText(path.join(root, "plan.json"), `${JSON.stringify(taskPlan, null, 2)}\n`);
+  const legacyPrimaryOutputFileLine = options.includeLegacyPrimaryOutputFile
+    ? 'primary_output_file = "legacy-output.txt"\n'
+    : "";
   await writeText(
     path.join(root, "task.toml"),
     `version = "1.0"
@@ -167,8 +172,7 @@ author_email = "test@example.com"
 difficulty = "${taskPlan.difficulty}"
 category = "${taskPlan.category}"
 tags = ["debugging", "fixture"]
-primary_output_file = "${taskPlan.primaryOutputFile}"
-source_template_id = "${options.sourceTemplateId ?? taskPlan.templateId}"
+${legacyPrimaryOutputFileLine}source_template_id = "${options.sourceTemplateId ?? taskPlan.templateId}"
 task_role = "${taskPlan.taskRole}"
 
 [environment]
@@ -190,48 +194,37 @@ gpus = 0
 }
 
 {
-  const familyPlan: FamilyPlan = {
-    templateId: template.templateId,
-    skillMode: "per-skill",
-    targetSkillDirName: nodeConnectSkill.dirName,
-    targetSkillName: nodeConnectSkill.name,
-    familyTheme: "Debugging family",
-    similarTasks: [
-      {
-        title: "Similar 1",
-        goal: "A",
-        primaryOutputFile: "similar.json",
-        difficulty: "hard",
-        category: "debugging",
-        skillBenefitRationale: "A",
-      },
-    ],
-    transferTasks: [
-      {
-        title: "Transfer 1",
-        goal: "B",
-        primaryOutputFile: "transfer.json",
-        difficulty: "hard",
-        category: "debugging",
-        skillBenefitRationale: "B",
-      },
-    ],
-  };
-
-  assert.deepEqual(
-    validateFamilyPlan(familyPlan, {
+  const taskPlans: DerivedTaskPlan[] = [
+    {
+      derivedTaskId: "similar1",
+      taskRole: "similar",
+      roleOrdinal: 1,
+      title: "Similar 1",
+      goal: "A",
+      difficulty: "hard",
+      category: "debugging",
+      skillBenefitRationale: "A",
       templateId: template.templateId,
       skillMode: "per-skill",
-      similarCount: 1,
-      transferCount: 1,
       targetSkillDirName: nodeConnectSkill.dirName,
       targetSkillName: nodeConnectSkill.name,
-    }),
-    [],
-  );
+    },
+    {
+      derivedTaskId: "transfer1",
+      taskRole: "transfer",
+      roleOrdinal: 1,
+      title: "Transfer 1",
+      goal: "B",
+      difficulty: "hard",
+      category: "debugging",
+      skillBenefitRationale: "B",
+      templateId: template.templateId,
+      skillMode: "per-skill",
+      targetSkillDirName: nodeConnectSkill.dirName,
+      targetSkillName: nodeConnectSkill.name,
+    },
+  ];
 
-  const taskPlans = flattenFamilyPlan(familyPlan);
-  assert.equal(taskPlans[0]?.templateId, template.templateId);
   assert.deepEqual(validateTaskPlans(taskPlans, { similarOrdinals: [1], transferOrdinals: [1] }), []);
 }
 
@@ -279,6 +272,18 @@ gpus = 0
 }
 
 {
+  const legacyMetadataDraft = await makeDraftFixture(perSkillUnit, plan, {
+    includeLegacyPrimaryOutputFile: true,
+  });
+  try {
+    const issues = await validateDraftStatic(legacyMetadataDraft, plan, perSkillUnit);
+    assert.deepEqual(issues, []);
+  } finally {
+    await fs.rm(legacyMetadataDraft, { recursive: true, force: true });
+  }
+}
+
+{
   const mutatedSkillDraft = await makeDraftFixture(perSkillUnit, plan, {
     mutateInjectedSkill: true,
   });
@@ -296,7 +301,6 @@ gpus = 0
     derivedTaskId: "similar1",
     taskRole: "similar",
     roleOrdinal: 1,
-    primaryOutputFile: "all-mode-summary.json",
     skillMode: "all",
     targetSkillDirName: "",
     targetSkillName: "",
@@ -430,6 +434,47 @@ gpus = 0
     buildSkillEffectBucketRoot("/tmp/output/final", "with_skill_pass__no_skill_fail"),
     "/tmp/output/final/_skill_effect_buckets/with_skill_pass__no_skill_fail",
   );
+}
+
+{
+  await ensureDir(path.join(template.sourceDir, "environment"));
+  await ensureDir(path.join(template.sourceDir, "solution"));
+  await ensureDir(path.join(template.sourceDir, "tests"));
+  await writeText(path.join(template.sourceDir, "task.toml"), "x\n");
+  await writeText(path.join(template.sourceDir, "instruction.md"), "x\n");
+  await writeText(path.join(template.sourceDir, "environment", "Dockerfile"), "FROM ubuntu:24.04\nWORKDIR /root\n");
+
+  const familyWorkspace = await createFamilyWorkspace(perSkillUnit, {
+    rawRoot: path.join(fixtureRoot, "attempt-workspace-output", "raw"),
+    runId: "run-attempts",
+  });
+  assert.equal(await pathExists(path.join(familyWorkspace.rootDir, "TASK_BUILDER_BRIEF.md")), false);
+  const attemptOne = await createTaskAttemptWorkspace(familyWorkspace, perSkillUnit, plan, {
+    attemptIndex: 1,
+  });
+  const attemptTwo = await createTaskAttemptWorkspace(familyWorkspace, perSkillUnit, plan, {
+    attemptIndex: 2,
+  });
+
+  assert.equal(
+    attemptOne.draftDir,
+    path.join(familyWorkspace.rootDir, "task_attempts", plan.derivedTaskId, "attempt-1", "draft"),
+  );
+  assert.equal(
+    attemptTwo.draftDir,
+    path.join(familyWorkspace.rootDir, "task_attempts", plan.derivedTaskId, "attempt-2", "draft"),
+  );
+
+  await prepareAttemptDraftSkeleton(attemptOne, plan);
+  assert.equal(await pathExists(path.join(attemptOne.draftDir, "plan.json")), true);
+  assert.equal(await pathExists(path.join(attemptTwo.draftDir, "plan.json")), false);
+  assert.equal(
+    await pathExists(path.join(attemptOne.draftDir, "environment", "skills", nodeConnectSkill.dirName, "SKILL.md")),
+    true,
+  );
+  assert.equal(await pathExists(attemptOne.briefPath), true);
+  assert.match(await readText(attemptOne.briefPath), /当前 task: transfer1 \(Transfer 1\)/);
+  assert.doesNotMatch(await readText(attemptOne.briefPath), /family 增量/);
 }
 
 {

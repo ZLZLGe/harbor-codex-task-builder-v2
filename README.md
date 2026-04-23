@@ -67,6 +67,8 @@ npm run generate-family -- \
   --output-root /Users/leviviya/Documents/Harbor/.local-workspace/codex_task_builder_v2_debugging \
   --concurrency 1 \
   --codex-run-retries 3 \
+  --task-attempt-timeout-hours 2 \
+  --max-task-restarts 1 \
   --max-repair-rounds 2
 ```
 
@@ -90,6 +92,14 @@ npm run generate-family -- \
   - 默认值是 `3`
   - `0` 表示关闭自动重试
   - 只作用于 planner / writer / review / repair 这些本地 builder 调用，不影响 Harbor / E2B trial 内部行为
+- `--task-attempt-timeout-hours`
+  - 可选，控制单题单次 fresh attempt 的 wall-clock 时长预算
+  - 默认值是 `2`
+  - `0` 表示关闭这层超时
+- `--max-task-restarts`
+  - 可选，控制单题在首版 attempt 失败后最多再 fresh restart 几次
+  - 默认值是 `1`
+  - fresh restart 会进入全新的 attempt workspace，不会复用旧草稿
 - `--max-repair-rounds`
 - `--limit`
   - 可选，按 unit 限制本次实际执行数量
@@ -108,7 +118,8 @@ npm run generate-family -- \
   manifest.jsonl
   <run-id>.json
   raw/
-    <run-id>/<template-id>/<scope>/...
+    <run-id>/<template-id>/<scope>/
+      task_attempts/<task-id>/attempt-<n>/...
   final/
     <template-id>/<scope>/<task-name>__with_skill
     <template-id>/<scope>/<task-name>__no_skill
@@ -144,25 +155,25 @@ final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__
   - 模板任务原样拷贝，包含模板自带的 `environment/skills/`
 - `input_skills/`
   - 本次输入的真实 skill payload
-- `drafts/<task>/environment/skills/`
-  - 从 `input_skills/` 自动注入的 shipped skills
+- `task_attempts/<task>/attempt-<n>/draft/environment/skills/`
+  - 当前 attempt 的 draft 会从 `input_skills/` 自动注入 shipped skills
 
 注意：
 
 - `template_source/` 只是参考模板，不是让 writer 机械复写的任务。
 - `input_skills/` 才是最终 shipped skill 的唯一来源。
-- `drafts/<task>/environment/skills/` 里的 injected skills 视为只读 payload，writer/repair 不允许修改。
+- `task_attempts/<task>/attempt-<n>/draft/environment/skills/` 里的 injected skills 视为只读 payload，writer/repair 不允许修改。
 - static validate 会校验 draft 中的 injected skill 与 `input_skills/` 内容完全一致。
+- family root 不再生成 `TASK_BUILDER_BRIEF.md`；当前 active 模型上下文只看 `task_attempts/<task>/attempt-<n>/TASK_BUILDER_BRIEF.md`。
 
 ## 当前执行语义
 
 当前执行模型是：
 
-- 保留 family planner
-  - planner 仍一次性产出当前 scope 下全部 `similar` / `transfer` blueprint
-- 改为 task 级串行执行
+- 改为 task 级单题 planner + 串行执行
   - 固定顺序是 `similar1..N` 先于 `transfer1..N`
-  - 每个 task 单独经历 `write -> blocking review -> static validate -> runtime -> skill-effect -> repair`
+  - 每个 task 单独经历 `single-task planner -> write -> blocking review -> static validate -> runtime -> skill-effect -> repair`
+  - 每次 fresh restart 都会切到新的 `task_attempts/<task>/attempt-<n>/` 工作区
   - `skill-effect` 内部会在变体准备完成后默认并行运行 `with_skill` / `no_skill`
 - 不再有独立 family reviewer
   - 去重改为 writer 主动避重 + 单任务 blocking reviewer 兜底
@@ -188,6 +199,8 @@ skill-effect gate 现在进一步区分：
 资源语义补充：
 
 - `--concurrency` 仍然只控制同时处理多少个 family unit
+- `--task-attempt-timeout-hours` 控制单题单次 attempt 的 wall-clock 预算
+- `--max-task-restarts` 控制单题在失败后最多再 fresh restart 几次
 - 单个 task 进入 `skill-effect` 阶段后，会默认同时起两个 Harbor/E2B trial
 - 因此 `skill-effect` 阶段的峰值活跃 trial 数最多可到 `2 * --concurrency`
 

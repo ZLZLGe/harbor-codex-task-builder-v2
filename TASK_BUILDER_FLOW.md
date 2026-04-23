@@ -6,7 +6,7 @@
 
 `codex_task_builder_v2` 不是一个单纯的“任务生成器”，而是一条闭环流水线：
 
-`family planner -> task writer -> task blocking reviewer -> static validate -> Harbor Oracle runtime -> skill-effect gate -> repair -> PF 立即双版本 publish / 非 PF 仅留 raw`
+`single-task planner -> task writer -> task blocking reviewer -> static validate -> Harbor Oracle runtime -> skill-effect gate -> repair -> PF 立即双版本 publish / 非 PF 仅留 raw`
 
 核心目标有两个：
 
@@ -131,15 +131,13 @@ PF bucket 镜像目录结构固定为：
   - 每个 family 只围绕一个目标 skill
   - scope 等于该 input skill 的 `dirName`
 
-### 4.3 FamilyPlan / DerivedTaskPlan
+### 4.3 SingleTaskPlan / DerivedTaskPlan
 
-- `FamilyPlan`
-  - planner 输出的 family 级蓝图
-  - 描述本轮应生成多少个 `similar` / `transfer`
-  - 当前核心身份字段是 `templateId`
+- `SingleTaskPlan`
+  - planner 对当前单题槽位返回的 blueprint
+  - 只包含当前 task 需要的 `title / goal / difficulty / category / skillBenefitRationale`
 - `DerivedTaskPlan`
-  - 把 `FamilyPlan` 展平后的单任务蓝图
-  - 程序会把 planner 的任务数组映射成 `similar1`、`transfer1` 这种固定 ID
+  - 程序在当前槽位基础上补齐 `derivedTaskId / taskRole / roleOrdinal / templateId / skillMode / targetSkill*` 后得到的单任务蓝图
 
 ## 5. CLI 入口
 
@@ -189,6 +187,13 @@ CLI 现在只保留两类命令：
   - 默认值是 `3`
   - `0` 表示关闭自动重试
   - 只影响本地 builder 进程，不影响 Harbor / E2B trial 内部重试行为
+- `--task-attempt-timeout-hours`
+  - 控制单题单次 fresh attempt 的 wall-clock 预算
+  - 默认值是 `2`
+  - `0` 表示关闭这层超时
+- `--max-task-restarts`
+  - 控制单题在首版 attempt 失败后，最多再 fresh restart 几次
+  - 默认值是 `1`
 
 ## 6. 完整造任务流程
 
@@ -277,80 +282,50 @@ preflight 失败会直接终止，不进入生成阶段。
 <output-root>/raw/<run-id>/<template-id>/<scope>/
 ```
 
-其中固定包含：
+family 根目录固定包含：
 
 - `template_source/`
 - `input_skills/`
-- `drafts/`
 - `artifacts/`
-- `TASK_BUILDER_BRIEF.md`
+- `task_attempts/`
 
 说明：
 
 - `template_source/` 是模板任务的工作副本，保留模板自带 `environment/skills/`
 - `input_skills/` 是本轮输入的真实 shipped skill payload
-- `drafts/` 是本轮派生任务草稿
-- `artifacts/` 存 planner / writer / reviewer / runtime / skill-effect / repair 的输出
-- `TASK_BUILDER_BRIEF.md` 是给 Codex 的统一总纲
+- family 根的 `artifacts/` 存 unit 级摘要
+- `task_attempts/` 下每个 task 的每次 fresh restart 都会拿到独立 attempt workspace，例如：
 
-### 第 6 步：planner 生成 family 蓝图
+```text
+task_attempts/<task-id>/attempt-<n>/
+  template_source/
+  input_skills/
+  draft/
+  artifacts/
+  TASK_BUILDER_BRIEF.md
+```
 
-程序调用 Codex planner，要求它：
+- 当前 Codex working directory 永远是当前 attempt 根目录，不会把旧 attempt 草稿直接暴露给新 attempt
+- family root 不再生成 `TASK_BUILDER_BRIEF.md`；只有 attempt 根目录会生成这份 brief，并作为当前 active prompt 的上下文入口
+### 第 6 步：按固定顺序串行执行任务
 
-- 先读 `TASK_BUILDER_BRIEF.md`
-- 再读 `template_source/`
-- 再读 `input_skills/`
-- 如有已发布任务，也必须读 final 里的历史任务
-
-planner 只做 family 规划，不直接写文件。
-
-planner 的输出是严格 JSON，核心字段包括：
-
-- `templateId`
-- `familyTheme`
-- `similarTasks`
-- `transferTasks`
-- 每个任务的：
-  - `title`
-  - `goal`
-  - `primaryOutputFile`
-  - `difficulty`
-  - `category`
-  - `skillBenefitRationale`
-
-随后程序会做三类校验：
-
-1. `validateFamilyPlan`
-   - `templateId` 是否一致
-   - `skillMode` 是否一致
-   - similar / transfer 数量是否一致
-2. `validateTaskPlans`
-   - `derivedTaskId` 是否符合 `similarN/transferN`
-   - `roleOrdinal` 是否正确
-   - `primaryOutputFile` 是否唯一
-3. `collectFamilyObservationIssues`
-   - family 角色布局是否正确
-
-如果 planner 阶段有 blocking issue，整组 family 会直接失败。
-
-### 第 7 步：按固定顺序串行执行任务
-
-planner 输出 `FamilyPlan` 后，程序会把它展平成 `DerivedTaskPlan`，再按固定顺序串行执行：
+当前版本不再先生成整份 family plan，而是按固定顺序逐槽位执行：
 
 - 全部 `similar` 按 `roleOrdinal` 升序
 - 全部 `transfer` 按 `roleOrdinal` 升序
 
 也就是说：
 
-- 不是“先把整组任务都写完，再统一 review / validate / publish”
-- 而是“一个 task 完整走完 write -> review -> validate -> runtime -> skill-effect -> repair，再处理下一个 task”
+- 不是“先把整组任务都规划出来，再统一写作”
+- 而是“一个 task 完整走完 single-task planner -> write -> review -> validate -> runtime -> skill-effect -> repair -> publish，再处理下一个 task”
 
 对于当前 task：
 
-1. 程序先创建 `drafts/<task-id>/`
-2. 预先把 `input_skills/` 复制到 `drafts/<task-id>/environment/skills/`
-3. 写入 `plan.json`
-4. 再调用 writer 生成：
+1. 先创建当前 task 的 `attempt-<n>/`
+2. 在该 attempt 内调用单题 planner，只返回当前槽位的 blueprint 字段
+3. 预先把 `input_skills/` 复制到 `draft/environment/skills/`
+4. 写入 `draft/plan.json`
+5. 再调用 writer 生成：
    - `task.toml`
    - `instruction.md`
    - `environment/Dockerfile`
@@ -363,8 +338,9 @@ planner 输出 `FamilyPlan` 后，程序会把它展平成 `DerivedTaskPlan`，�
 
 - draft 里的 `environment/skills/` 不再从模板复制
 - 而是始终从 `input_skills/` 注入
+- 同一个 task 的 fresh restart 不再复用旧草稿目录，而是进入新的 `attempt-<n>/draft/`
 - writer 做 sibling / 历史去重时，只参考 `final-root` 下已经发布的同 family 任务
-- workspace 中其他尚未发布的 sibling drafts 不再作为强制去重基准
+- workspace 中其他尚未发布的 sibling drafts，以及该 task 的旧 attempt，都不再作为强制去重基准
 
 ### 第 8 步：task blocking reviewer
 
@@ -404,7 +380,6 @@ task blocking reviewer 的输出只有：
   - `id`
   - `name`
   - `description`
-  - `primary_output_file`
   - `source_template_id`
   - `task_role`
 - `instruction.md`、`metadata.name`、`metadata.description` 是否包含中文
@@ -492,10 +467,10 @@ repair prompt 可以读取：
 - Oracle runtime 日志
 - with_skill / no_skill 日志、reward、trajectory、result
 
-repair 只允许修改：
+repair 只允许修改当前 attempt 的：
 
 ```text
-drafts/<task-id>/
+task_attempts/<task-id>/attempt-<n>/draft/
 ```
 
 明确禁止修改：
@@ -507,6 +482,13 @@ drafts/<task-id>/
 - injected skill payload
 
 修完后只会回到**当前 task** 的下一轮 reviewer / static / runtime / skill-effect，不会把已经通过并发布的其他 task 重新拉回流程。
+
+如果当前 attempt：
+
+- 超过 `--task-attempt-timeout-hours`
+- 或在当前 attempt 内耗尽 `--max-repair-rounds`
+
+则该 attempt 会结束；只要 `--max-task-restarts` 还有余额，程序就会重新创建新的 `attempt-<n+1>/` 从头 fresh restart。
 
 ### 第 13 步：publish / 保留 raw
 
@@ -599,4 +581,4 @@ output root 顶层还会额外写：
 
 ## 9. 一句话总结
 
-**当前 `codex_task_builder_v2` 的主流程是：先把 template 和 input skills 组装成 family unit，再让 Codex 基于 `template_source/`、`input_skills/`、Harbor 参考材料和已发布任务做 family 规划，然后按 `similar -> transfer` 的固定顺序逐个任务写作、单题 blocking 审查、static validate、Harbor Oracle runtime 和 skill-effect 对照；默认 gate 开启时，某个任务只有在达到真正 PF 的 `with_skill_pass__no_skill_fail` 时才会把 `__with_skill` / `__no_skill` 两份快照一起发布到 `<output-root>/final`；如果显式关闭 skill-effect gate，则 runtime 通过后只发布 `__with_skill`，其他失败结果只留在 `raw`。**
+**当前 `codex_task_builder_v2` 的主流程是：先把 template 和 input skills 组装成 family unit，再按 `similar -> transfer` 的固定顺序逐槽位执行单题 planner；每个 task 都在独立的 `task_attempts/<task-id>/attempt-<n>/` 工作区内完成 writer、单题 blocking 审查、static validate、Harbor Oracle runtime 和 skill-effect 对照，并在超时或 repair 用尽时 fresh restart 到新的 attempt；默认 gate 开启时，某个任务只有在达到真正 PF 的 `with_skill_pass__no_skill_fail` 时才会把 `__with_skill` / `__no_skill` 两份快照一起发布到 `<output-root>/final`；如果显式关闭 skill-effect gate，则 runtime 通过后只发布 `__with_skill`，其他失败结果只留在 `raw`。**

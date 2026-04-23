@@ -2,7 +2,6 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { extractHarborTrialMetrics, type HarborTrialMetrics } from "./harbor_metrics.js";
 import type { DerivedTaskPlan } from "./schema.js";
-import type { FamilyWorkspace } from "./workspace.js";
 import type { RuntimeEnvironment, RuntimeFailureKind, RuntimePreflightResult, ValidationIssue } from "./validate.js";
 import { runRuntimePreflight } from "./validate.js";
 import {
@@ -73,6 +72,12 @@ type CommandRunner = typeof runCommand;
 type RuntimeLogEntry = {
   label: string;
   path: string;
+};
+
+type SkillEffectWorkspace = {
+  runId: string;
+  rootDir: string;
+  artifactsDir: string;
 };
 
 type SkillEffectDeps = {
@@ -291,13 +296,18 @@ export async function prepareWithSkillVariant(options: {
   };
 }
 
-function buildVariantLogRoot(workspace: FamilyWorkspace, plan: DerivedTaskPlan, cycle: number, attemptIndex: number): string {
+function buildVariantLogRoot(
+  workspace: SkillEffectWorkspace,
+  plan: DerivedTaskPlan,
+  cycle: number,
+  attemptIndex: number,
+): string {
   return path.join(workspace.artifactsDir, "skill_effect", plan.derivedTaskId, `cycle-${cycle}-attempt-${attemptIndex}`);
 }
 
 async function runAgentVariant(options: {
   variant: SkillEffectVariant;
-  workspace: FamilyWorkspace;
+  workspace: SkillEffectWorkspace;
   plan: DerivedTaskPlan;
   taskDir: string;
   logsDir: string;
@@ -306,6 +316,7 @@ async function runAgentVariant(options: {
   apiKey: string;
   baseUrl?: string;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }): Promise<AgentRunResult> {
   const jobName = `harbor-${options.variant}-${slugify(options.workspace.runId)}-${slugify(options.plan.derivedTaskId)}`;
   const logFilePath = path.join(options.logsDir, "harbor-run.log");
@@ -356,6 +367,7 @@ async function runAgentVariant(options: {
     onStderr: (chunk) => {
       process.stderr.write(chunk);
     },
+    signal: options.signal,
   });
 
   const jobDir = path.join(options.logsDir, jobName);
@@ -614,7 +626,7 @@ export function buildSkillEffectBucketRoot(baseRoot: string, bucket: SkillEffect
 }
 
 export async function runSkillEffectEvaluation(args: {
-  workspace: FamilyWorkspace;
+  workspace: SkillEffectWorkspace;
   plan: DerivedTaskPlan;
   runtimeEnvironment: RuntimeEnvironment;
   cycle: number;
@@ -624,6 +636,7 @@ export async function runSkillEffectEvaluation(args: {
   apiKey: string;
   baseUrl?: string;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
   deps?: Partial<SkillEffectDeps>;
 }): Promise<SkillEffectEvaluationResult> {
   const deps: SkillEffectDeps = {
@@ -657,6 +670,7 @@ export async function runSkillEffectEvaluation(args: {
     apiKey: args.apiKey,
     baseUrl: args.baseUrl,
     env: args.env,
+    signal: args.signal,
   });
 
   const noSkillPromise = deps.runAgentVariant({
@@ -670,6 +684,7 @@ export async function runSkillEffectEvaluation(args: {
     apiKey: args.apiKey,
     baseUrl: args.baseUrl,
     env: args.env,
+    signal: args.signal,
   });
 
   const [withSkillSettled, noSkillSettled] = await Promise.allSettled([withSkillPromise, noSkillPromise]);

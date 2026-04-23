@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { CodexTaskBuilderClient } from "../src/codex.js";
-import type { FamilyPlan } from "../src/schema.js";
-import { parseNonNegativeInteger } from "../src/utils.js";
+import { parseNonNegativeInteger, parseNonNegativeNumber } from "../src/utils.js";
 
 type FakeThreadBehavior = {
   threadId?: string | null;
@@ -61,25 +60,6 @@ function buildFakeCodex(args: {
   };
 }
 
-const familyPlan: FamilyPlan = {
-  templateId: "tools__debugging",
-  skillMode: "per-skill",
-  targetSkillDirName: "01__node-connect",
-  targetSkillName: "node-connect",
-  familyTheme: "Debugging family",
-  similarTasks: [
-    {
-      title: "Investigate connection failures",
-      goal: "Fix the connection issue",
-      primaryOutputFile: "report.txt",
-      difficulty: "medium",
-      category: "debugging",
-      skillBenefitRationale: "The skill helps narrow the root cause quickly",
-    },
-  ],
-  transferTasks: [],
-};
-
 const unit = {
   template: {
     templateId: "tools__debugging",
@@ -120,7 +100,6 @@ const plan = {
   roleOrdinal: 1,
   title: "Investigate connection failures",
   goal: "Fix the connection issue",
-  primaryOutputFile: "report.txt",
   difficulty: "medium",
   category: "debugging",
   skillBenefitRationale: "The skill helps narrow the root cause quickly",
@@ -145,6 +124,13 @@ try {
     () => parseNonNegativeInteger("1.5", "--codex-run-retries", 3),
     /--codex-run-retries 必须是 >= 0 的整数/,
   );
+  assert.equal(parseNonNegativeNumber(undefined, "--task-attempt-timeout-hours", 2), 2);
+  assert.equal(parseNonNegativeNumber("0", "--task-attempt-timeout-hours", 2), 0);
+  assert.equal(parseNonNegativeNumber("1.5", "--task-attempt-timeout-hours", 2), 1.5);
+  assert.throws(
+    () => parseNonNegativeNumber("-1", "--task-attempt-timeout-hours", 2),
+    /--task-attempt-timeout-hours 必须是 >= 0 的数字/,
+  );
 
   {
     const fakeCodex = buildFakeCodex({
@@ -159,7 +145,15 @@ try {
       },
     });
 
-    await assert.rejects(() => client.planFamily(unit as never, workspace as never), /plan failure/);
+    await assert.rejects(
+      () =>
+        client.planTask(unit as never, workspace as never, {
+          derivedTaskId: "similar1",
+          taskRole: "similar",
+          roleOrdinal: 1,
+        }),
+      /plan failure/,
+    );
     assert.equal(fakeCodex.startCallCount(), 1);
     assert.deepEqual(sleeps, []);
   }
@@ -172,7 +166,13 @@ try {
         { error: new Error("plan failure 3") },
         {
           threadId: "plan-thread-4",
-          finalResponse: JSON.stringify(familyPlan),
+          finalResponse: JSON.stringify({
+            title: "Investigate connection failures",
+            goal: "Fix the connection issue",
+            difficulty: "medium",
+            category: "debugging",
+            skillBenefitRationale: "The skill helps narrow the root cause quickly",
+          }),
         },
       ],
     });
@@ -185,11 +185,49 @@ try {
       },
     });
 
-    const result = await client.planFamily(unit as never, workspace as never);
+    const result = await client.planTask(unit as never, workspace as never, {
+      derivedTaskId: "similar1",
+      taskRole: "similar",
+      roleOrdinal: 1,
+    });
     assert.equal(result.threadId, "plan-thread-4");
-    assert.equal(result.data.familyTheme, familyPlan.familyTheme);
+    assert.equal("primaryOutputFile" in result.data, false);
     assert.equal(fakeCodex.startCallCount(), 4);
     assert.deepEqual(sleeps, [2_000, 4_000, 8_000]);
+  }
+
+  {
+    const fakeCodex = buildFakeCodex({
+      startBehaviors: [
+        {
+          threadId: "task-plan-thread-1",
+          finalResponse: JSON.stringify({
+            title: "Investigate connection failures",
+            goal: "Fix the connection issue",
+            difficulty: "medium",
+            category: "debugging",
+            skillBenefitRationale: "The skill helps narrow the root cause quickly",
+          }),
+        },
+      ],
+    });
+    const client = new CodexTaskBuilderClient({
+      codexRunRetries: 0,
+      codex: fakeCodex.codex,
+    });
+
+    const result = await client.planTask(
+      unit as never,
+      workspace as never,
+      {
+        derivedTaskId: "similar1",
+        taskRole: "similar",
+        roleOrdinal: 1,
+      },
+    );
+    assert.equal(result.threadId, "task-plan-thread-1");
+    assert.equal("primaryOutputFile" in result.data, false);
+    assert.equal(fakeCodex.startCallCount(), 1);
   }
 
   {
@@ -242,7 +280,7 @@ try {
       },
     });
 
-    const result = await client.reviewTaskBlocking(unit as never, workspace as never, familyPlan, plan as never);
+    const result = await client.reviewTaskBlocking(unit as never, workspace as never, plan as never);
     assert.equal(result.threadId, "review-thread-2");
     assert.equal(result.data.taskResults[0]?.blockingPass, true);
     assert.equal(fakeCodex.startCallCount(), 2);

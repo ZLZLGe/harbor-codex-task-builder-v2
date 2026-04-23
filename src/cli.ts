@@ -13,8 +13,7 @@ import {
 import { appendManifest, writeRunSummary, type ManifestEntry } from "./manifest.js";
 import { buildPublishedVariantTaskDir, sanitizeAndCopyTask } from "./materialize.js";
 import { applyPublishedFamilyState, inspectPublishedFamily, selectExecutableUnits } from "./published.js";
-import type { DerivedTaskPlan, FamilyPlan, WriterSummary } from "./schema.js";
-import { flattenFamilyPlan } from "./schema.js";
+import type { DerivedTaskPlan, SingleTaskPlan, WriterSummary } from "./schema.js";
 import {
   buildSkillEffectBucketRoot,
   buildSkillEffectIssues,
@@ -31,17 +30,22 @@ import {
   buildRawRoot,
   ensureDir,
   parseNonNegativeInteger,
+  parseNonNegativeNumber,
   writeJson,
 } from "./utils.js";
-import { createFamilyWorkspace, prepareDraftSkeleton, type FamilyWorkspace } from "./workspace.js";
 import {
-  collectFamilyObservationIssues,
+  createFamilyWorkspace,
+  createTaskAttemptWorkspace,
+  prepareAttemptDraftSkeleton,
+  type FamilyWorkspace,
+  type TaskAttemptWorkspace,
+} from "./workspace.js";
+import {
   resolveRuntimeEnvironment,
   runRuntimePreflight,
   runRuntimeValidation,
   validateBlockingReviewResult,
   validateDraftStatic,
-  validateFamilyPlan,
   validateTaskPlans,
   type RuntimeEnvironment,
   type RuntimeEvidence,
@@ -97,16 +101,15 @@ type FamilyExecutionResult = {
 };
 
 type TaskCycleState = {
+  attemptWorkspace: TaskAttemptWorkspace;
+  attemptIndex: number;
   plan: DerivedTaskPlan;
   draftDir: string;
-  writerSummary: WriterSummary;
+  writerSummary?: WriterSummary;
   repairThreadId: string | null;
   repairRoundsUsed: number;
   runtimeAttemptCount: number;
   skillEffectAttemptCount: number;
-  lastMutatedCycle: number | null;
-  runtimePassedCycle: number | null;
-  skillEffectAcceptedCycle: number | null;
   blockingIssues: ValidationIssue[];
   staticIssues: ValidationIssue[];
   runtimeIssues: ValidationIssue[];
@@ -126,11 +129,29 @@ type ExecuteFamilyOptions = {
   runtimeEnvironment: RuntimeEnvironment;
   maxRepairRounds: number;
   codexRunRetries: number;
+  taskAttemptTimeoutHours: number;
+  maxTaskRestarts: number;
   skillEffectEnabled: boolean;
   skillEffectModel: string;
   skillEffectApiKey: string;
   skillEffectBaseUrl?: string;
 };
+
+type TaskSlot = Pick<DerivedTaskPlan, "derivedTaskId" | "taskRole" | "roleOrdinal">;
+
+type TaskAttemptResult =
+  | {
+      status: "published";
+      taskState: TaskCycleState;
+      attemptWorkspace: TaskAttemptWorkspace;
+      issues: string[];
+    }
+  | {
+      status: "timed_out" | "exhausted_repairs";
+      taskState?: TaskCycleState;
+      attemptWorkspace: TaskAttemptWorkspace;
+      issues: string[];
+    };
 
 function parseArgs(argv: string[]): { command: string | undefined; options: Options } {
   const [command, ...rest] = argv;
@@ -244,16 +265,6 @@ function resolvePendingOrdinals(unit: {
   };
 }
 
-function normalizeFamilyPlan(unit: GenerationUnit, familyPlan: FamilyPlan): FamilyPlan {
-  return {
-    ...familyPlan,
-    templateId: unit.template.templateId,
-    skillMode: unit.skillMode,
-    targetSkillDirName: unit.targetSkill?.dirName ?? "",
-    targetSkillName: unit.targetSkill?.name ?? "",
-  };
-}
-
 function buildScopeMetadata(
   unit: GenerationUnit,
   runtimeEnvironment?: RuntimeEnvironment,
@@ -277,11 +288,112 @@ function buildScopeMetadata(
   };
 }
 
-function compareTaskPlansForExecution(left: DerivedTaskPlan, right: DerivedTaskPlan): number {
-  if (left.taskRole !== right.taskRole) {
-    return left.taskRole === "similar" ? -1 : 1;
+class TaskAttemptTimeoutError extends Error {
+  constructor(
+    derivedTaskId: string,
+    attemptIndex: number,
+    stepLabel: string,
+  ) {
+    super(`${derivedTaskId} attempt-${attemptIndex} 在 ${stepLabel} 阶段超时，已中断当前 attempt`);
+    this.name = "TaskAttemptTimeoutError";
   }
-  return left.roleOrdinal - right.roleOrdinal;
+}
+
+function buildTaskSlots(unit: GenerationUnit): TaskSlot[] {
+  const slots: TaskSlot[] = [];
+  for (const ordinal of unit.pendingSimilarOrdinals) {
+    slots.push({
+      derivedTaskId: `similar${ordinal}`,
+      taskRole: "similar",
+      roleOrdinal: ordinal,
+    });
+  }
+  for (const ordinal of unit.pendingTransferOrdinals) {
+    slots.push({
+      derivedTaskId: `transfer${ordinal}`,
+      taskRole: "transfer",
+      roleOrdinal: ordinal,
+    });
+  }
+  return slots;
+}
+
+function buildSingleTaskUnit(unit: GenerationUnit, slot: TaskSlot): GenerationUnit {
+  return {
+    ...unit,
+    pendingSimilarOrdinals: slot.taskRole === "similar" ? [slot.roleOrdinal] : [],
+    pendingTransferOrdinals: slot.taskRole === "transfer" ? [slot.roleOrdinal] : [],
+  };
+}
+
+function buildDerivedTaskPlan(
+  unit: GenerationUnit,
+  slot: TaskSlot,
+  plannedTask: SingleTaskPlan,
+): DerivedTaskPlan {
+  return {
+    derivedTaskId: slot.derivedTaskId,
+    taskRole: slot.taskRole,
+    roleOrdinal: slot.roleOrdinal,
+    title: plannedTask.title,
+    goal: plannedTask.goal,
+    difficulty: plannedTask.difficulty,
+    category: plannedTask.category,
+    skillBenefitRationale: plannedTask.skillBenefitRationale,
+    templateId: unit.template.templateId,
+    skillMode: unit.skillMode,
+    targetSkillDirName: unit.targetSkill?.dirName ?? "",
+    targetSkillName: unit.targetSkill?.name ?? "",
+  };
+}
+
+function buildTaskPlanValidationIssues(plan: DerivedTaskPlan, slot: TaskSlot): ValidationIssue[] {
+  return validateTaskPlans([plan], {
+    similarOrdinals: slot.taskRole === "similar" ? [slot.roleOrdinal] : [],
+    transferOrdinals: slot.taskRole === "transfer" ? [slot.roleOrdinal] : [],
+  });
+}
+
+function removePendingSlot(unit: GenerationUnit, slot: TaskSlot): void {
+  if (slot.taskRole === "similar") {
+    unit.pendingSimilarOrdinals = unit.pendingSimilarOrdinals.filter((ordinal) => ordinal !== slot.roleOrdinal);
+    return;
+  }
+  unit.pendingTransferOrdinals = unit.pendingTransferOrdinals.filter((ordinal) => ordinal !== slot.roleOrdinal);
+}
+
+function buildAttemptDeadlineAt(timeoutHours: number): number | null {
+  if (timeoutHours <= 0) {
+    return null;
+  }
+  return Date.now() + timeoutHours * 60 * 60 * 1000;
+}
+
+async function withAttemptDeadline<T>(
+  taskId: string,
+  attemptIndex: number,
+  stepLabel: string,
+  deadlineAt: number | null,
+  run: (signal?: AbortSignal) => Promise<T>,
+): Promise<T> {
+  if (deadlineAt === null) {
+    return run(undefined);
+  }
+
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    throw new TaskAttemptTimeoutError(taskId, attemptIndex, stepLabel);
+  }
+
+  const signal = AbortSignal.timeout(Math.max(1, Math.ceil(remainingMs)));
+  try {
+    return await run(signal);
+  } catch (error) {
+    if (signal.aborted) {
+      throw new TaskAttemptTimeoutError(taskId, attemptIndex, stepLabel);
+    }
+    throw error;
+  }
 }
 
 function comparePublishedTasks(left: PublishedTaskInfo, right: PublishedTaskInfo): number {
@@ -312,13 +424,17 @@ function upsertPublishedTask(unit: GenerationUnit, publishedTask: PublishedTaskI
   unit.publishedTasks = nextPublishedTasks;
 }
 
-function buildFailedTaskRef(taskState: TaskCycleState): FamilyExecutionResult["failedTaskRefs"][number] {
+function buildFailedTaskRef(
+  derivedTaskId: string,
+  draftDir: string,
+  taskState?: TaskCycleState,
+): FamilyExecutionResult["failedTaskRefs"][number] {
   return {
-    derivedTaskId: taskState.plan.derivedTaskId,
-    draftDir: taskState.draftDir,
-    latestRuntimeResultPath: taskState.runtimeEvidence?.resultPath,
-    latestSkillEffectResultPath: taskState.skillEffectResultPath,
-    latestSkillEffectPairRoot: taskState.skillEffectEvaluation?.pairRoot,
+    derivedTaskId,
+    draftDir,
+    latestRuntimeResultPath: taskState?.runtimeEvidence?.resultPath,
+    latestSkillEffectResultPath: taskState?.skillEffectResultPath,
+    latestSkillEffectPairRoot: taskState?.skillEffectEvaluation?.pairRoot,
   };
 }
 
@@ -340,15 +456,17 @@ async function inventory(templateRoot: string): Promise<void> {
 async function repairTaskDraft(
   codex: CodexTaskBuilderClient,
   unit: GenerationUnit,
-  workspace: FamilyWorkspace,
+  workspace: TaskAttemptWorkspace,
   taskState: TaskCycleState,
   cycle: number,
   outputRoot: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const repairResult = await codex.repairTask({
     unit,
     workspace,
     plan: taskState.plan,
+    draftDirLabel: "draft/",
     blockingIssues: issueMessages(taskState.blockingIssues),
     staticIssues: issueMessages(taskState.staticIssues),
     runtimeIssues: issueMessages(taskState.runtimeIssues),
@@ -374,12 +492,10 @@ async function repairTaskDraft(
     noSkillRewardPath: taskState.skillEffectEvaluation?.noSkill.evidence.rewardPath,
     noSkillTrajectoryPath: taskState.skillEffectEvaluation?.noSkill.evidence.trajectoryPath,
     threadId: taskState.repairThreadId,
+    signal,
   });
   taskState.repairThreadId = repairResult.threadId;
   taskState.repairRoundsUsed += 1;
-  taskState.lastMutatedCycle = cycle;
-  taskState.runtimePassedCycle = null;
-  taskState.skillEffectAcceptedCycle = null;
   taskState.acceptedWithSkillVariantDir = undefined;
   taskState.acceptedNoSkillVariantDir = undefined;
   taskState.passed = false;
@@ -409,16 +525,385 @@ async function repairTaskDraft(
         ...issueMessages(taskState.runtimeIssues),
         ...issueMessages(taskState.skillEffectIssues),
       ],
+      metadata: {
+        cycle,
+        attemptIndex: taskState.attemptIndex,
+      },
     },
     outputRoot,
   );
+}
+
+async function executeTaskAttempt(
+  codex: CodexTaskBuilderClient,
+  unit: GenerationUnit,
+  familyWorkspace: FamilyWorkspace,
+  slot: TaskSlot,
+  attemptIndex: number,
+  options: ExecuteFamilyOptions,
+): Promise<TaskAttemptResult> {
+  const taskUnit = buildSingleTaskUnit(unit, slot);
+  const attemptWorkspace = await createTaskAttemptWorkspace(familyWorkspace, taskUnit, slot, {
+    attemptIndex,
+  });
+  const deadlineAt = buildAttemptDeadlineAt(options.taskAttemptTimeoutHours);
+
+  await appendManifest(
+    {
+      runId: familyWorkspace.runId,
+      templateId: unit.template.templateId,
+      derivedTaskId: slot.derivedTaskId,
+      phase: "task-attempt",
+      status: "started",
+      draftDir: attemptWorkspace.draftDir,
+      metadata: {
+        ...buildScopeMetadata(taskUnit, options.runtimeEnvironment),
+        attemptIndex,
+      },
+    },
+    options.outputRoot,
+  );
+
+  try {
+    const plannerResult = await withAttemptDeadline(slot.derivedTaskId, attemptIndex, "planner", deadlineAt, (signal) =>
+      codex.planTask(taskUnit, attemptWorkspace, slot, { signal }),
+    );
+    const plan = buildDerivedTaskPlan(taskUnit, slot, plannerResult.data);
+    const plannerIssues = buildTaskPlanValidationIssues(plan, slot);
+
+    await writeJson(path.join(attemptWorkspace.artifactsDir, `${slot.derivedTaskId}.planner.json`), plan);
+    await writeJson(path.join(attemptWorkspace.artifactsDir, `${slot.derivedTaskId}.planner.raw.json`), {
+      threadId: plannerResult.threadId,
+      raw: plannerResult.raw,
+    });
+    await appendManifest(
+      {
+        runId: familyWorkspace.runId,
+        templateId: unit.template.templateId,
+        derivedTaskId: slot.derivedTaskId,
+        phase: "planner",
+        status: plannerIssues.length === 0 ? "completed" : "failed",
+        threadId: plannerResult.threadId,
+        draftDir: attemptWorkspace.draftDir,
+        issues: issueMessages(plannerIssues),
+        metadata: {
+          ...buildScopeMetadata(taskUnit, options.runtimeEnvironment),
+          attemptIndex,
+        },
+      },
+      options.outputRoot,
+    );
+
+    if (plannerIssues.length > 0) {
+      return {
+        status: "exhausted_repairs",
+        attemptWorkspace,
+        issues: issueMessages(plannerIssues),
+      };
+    }
+
+    const draftDir = await prepareAttemptDraftSkeleton(attemptWorkspace, plan);
+    const writerResult = await withAttemptDeadline(slot.derivedTaskId, attemptIndex, "writer", deadlineAt, (signal) =>
+      codex.writeTask(taskUnit, attemptWorkspace, plan, {
+        signal,
+        draftDirLabel: "draft/",
+      }),
+    );
+    await writeJson(path.join(attemptWorkspace.artifactsDir, `${plan.derivedTaskId}.writer.json`), writerResult.data);
+    await writeJson(path.join(attemptWorkspace.artifactsDir, `${plan.derivedTaskId}.writer.raw.json`), {
+      threadId: writerResult.threadId,
+      raw: writerResult.raw,
+    });
+    await appendManifest(
+      {
+        runId: familyWorkspace.runId,
+        templateId: unit.template.templateId,
+        derivedTaskId: plan.derivedTaskId,
+        phase: "writer",
+        status: "completed",
+        threadId: writerResult.threadId,
+        draftDir,
+        metadata: {
+          ...buildScopeMetadata(taskUnit, options.runtimeEnvironment),
+          attemptIndex,
+        },
+      },
+      options.outputRoot,
+    );
+
+    const taskState: TaskCycleState = {
+      attemptWorkspace,
+      attemptIndex,
+      plan,
+      draftDir,
+      writerSummary: writerResult.data,
+      repairThreadId: null,
+      repairRoundsUsed: 0,
+      runtimeAttemptCount: 0,
+      skillEffectAttemptCount: 0,
+      blockingIssues: [],
+      staticIssues: [],
+      runtimeIssues: [],
+      skillEffectIssues: [],
+      acceptedWithSkillVariantDir: undefined,
+      acceptedNoSkillVariantDir: undefined,
+      passed: false,
+    };
+
+    for (let cycle = 0; cycle <= options.maxRepairRounds; cycle += 1) {
+      const reviewResult = await withAttemptDeadline(plan.derivedTaskId, attemptIndex, "review", deadlineAt, (signal) =>
+        codex.reviewTaskBlocking(taskUnit, attemptWorkspace, plan, {
+          signal,
+          draftDirLabel: "draft/",
+        }),
+      );
+      const reviewValidation = validateBlockingReviewResult([plan], reviewResult.data);
+      await writeJson(
+        path.join(attemptWorkspace.artifactsDir, `${plan.derivedTaskId}.review.round-${cycle}.json`),
+        reviewResult.data,
+      );
+      await writeJson(
+        path.join(attemptWorkspace.artifactsDir, `${plan.derivedTaskId}.review.round-${cycle}.raw.json`),
+        {
+          threadId: reviewResult.threadId,
+          raw: reviewResult.raw,
+        },
+      );
+
+      taskState.blockingIssues = reviewValidation.taskIssuesById.get(plan.derivedTaskId) ?? [];
+      taskState.staticIssues = await validateDraftStatic(taskState.draftDir, plan, taskUnit);
+      taskState.runtimeIssues = [];
+      taskState.skillEffectIssues = [];
+      taskState.runtimeEvidence = undefined;
+      taskState.skillEffectEvaluation = undefined;
+      taskState.skillEffectResultPath = undefined;
+      taskState.acceptedWithSkillVariantDir = undefined;
+      taskState.acceptedNoSkillVariantDir = undefined;
+      taskState.passed = false;
+
+      const preRuntimeIssues = [...taskState.blockingIssues, ...taskState.staticIssues];
+      await appendManifest(
+        {
+          runId: familyWorkspace.runId,
+          templateId: unit.template.templateId,
+          derivedTaskId: plan.derivedTaskId,
+          phase: "validate",
+          status: preRuntimeIssues.length === 0 ? "completed" : "failed",
+          draftDir: taskState.draftDir,
+          issues: issueMessages(preRuntimeIssues),
+          metadata: {
+            ...buildScopeMetadata(taskUnit, options.runtimeEnvironment),
+            attemptIndex,
+            cycle,
+          },
+        },
+        options.outputRoot,
+      );
+
+      if (preRuntimeIssues.length > 0) {
+        if (taskState.repairRoundsUsed < options.maxRepairRounds) {
+          await withAttemptDeadline(plan.derivedTaskId, attemptIndex, "repair", deadlineAt, (signal) =>
+            repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, options.outputRoot, signal),
+          );
+          continue;
+        }
+        return {
+          status: "exhausted_repairs",
+          taskState,
+          attemptWorkspace,
+          issues: issueMessages(preRuntimeIssues),
+        };
+      }
+
+      const runtimeAttemptIndex = taskState.runtimeAttemptCount + 1;
+      const runtimeResult = await withAttemptDeadline(
+        plan.derivedTaskId,
+        attemptIndex,
+        "runtime",
+        deadlineAt,
+        (signal) =>
+          runRuntimeValidation(
+            attemptWorkspace,
+            plan,
+            options.runtimeEnvironment,
+            cycle,
+            runtimeAttemptIndex,
+            taskState.draftDir,
+            process.env,
+            signal,
+          ),
+      );
+      taskState.runtimeAttemptCount = runtimeAttemptIndex;
+      taskState.runtimeIssues = runtimeResult.issues;
+      taskState.runtimeEvidence = runtimeResult.evidence;
+      await writeJson(
+        path.join(attemptWorkspace.artifactsDir, `${plan.derivedTaskId}.runtime.cycle-${cycle}.attempt-${runtimeAttemptIndex}.json`),
+        {
+          passed: runtimeResult.passed,
+          failureKind: runtimeResult.failureKind,
+          issues: issueMessages(runtimeResult.issues),
+          evidence: runtimeResult.evidence,
+        },
+      );
+      await writeJson(path.join(attemptWorkspace.artifactsDir, `${plan.derivedTaskId}.runtime.cycle-${cycle}.json`), {
+        passed: runtimeResult.passed,
+        failureKind: runtimeResult.failureKind,
+        issues: issueMessages(runtimeResult.issues),
+        evidence: runtimeResult.evidence,
+      });
+
+      if (!runtimeResult.passed) {
+        await appendManifest(
+          {
+            runId: familyWorkspace.runId,
+            templateId: unit.template.templateId,
+            derivedTaskId: plan.derivedTaskId,
+            phase: "validate",
+            status: "failed",
+            draftDir: taskState.draftDir,
+            issues: issueMessages(runtimeResult.issues),
+            metadata: {
+              ...buildScopeMetadata(taskUnit, options.runtimeEnvironment),
+              attemptIndex,
+              cycle,
+              runtimeAttempt: runtimeAttemptIndex,
+              runtimeFailureKind: runtimeResult.failureKind,
+            },
+          },
+          options.outputRoot,
+        );
+
+        if (taskState.repairRoundsUsed < options.maxRepairRounds) {
+          await withAttemptDeadline(plan.derivedTaskId, attemptIndex, "repair", deadlineAt, (signal) =>
+            repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, options.outputRoot, signal),
+          );
+          continue;
+        }
+        return {
+          status: "exhausted_repairs",
+          taskState,
+          attemptWorkspace,
+          issues: issueMessages(runtimeResult.issues),
+        };
+      }
+
+      if (!options.skillEffectEnabled) {
+        taskState.acceptedWithSkillVariantDir = taskState.draftDir;
+        taskState.acceptedNoSkillVariantDir = undefined;
+        taskState.passed = true;
+        return {
+          status: "published",
+          taskState,
+          attemptWorkspace,
+          issues: [],
+        };
+      }
+
+      const skillEffectAttemptIndex = taskState.skillEffectAttemptCount + 1;
+      const skillEffectResult = await withAttemptDeadline(
+        plan.derivedTaskId,
+        attemptIndex,
+        "skill-effect",
+        deadlineAt,
+        (signal) =>
+          runSkillEffectEvaluation({
+            workspace: attemptWorkspace,
+            plan,
+            runtimeEnvironment: options.runtimeEnvironment,
+            cycle,
+            attemptIndex: skillEffectAttemptIndex,
+            draftTaskDir: taskState.draftDir,
+            modelName: options.skillEffectModel,
+            apiKey: options.skillEffectApiKey,
+            baseUrl: options.skillEffectBaseUrl,
+            signal,
+          }),
+      );
+      taskState.skillEffectAttemptCount = skillEffectAttemptIndex;
+      taskState.skillEffectEvaluation = skillEffectResult;
+      taskState.skillEffectIssues = buildSkillEffectIssues(plan.derivedTaskId, skillEffectResult);
+      taskState.acceptedWithSkillVariantDir = skillEffectResult.repairRequired
+        ? undefined
+        : skillEffectResult.withSkill.evidence.variantTaskDir;
+      taskState.acceptedNoSkillVariantDir = skillEffectResult.repairRequired
+        ? undefined
+        : skillEffectResult.noSkill.evidence.variantTaskDir;
+      taskState.skillEffectResultPath = await writeSkillEffectResultArtifact({
+        artifactsDir: attemptWorkspace.artifactsDir,
+        derivedTaskId: plan.derivedTaskId,
+        cycle,
+        attemptIndex: skillEffectAttemptIndex,
+        result: skillEffectResult,
+      });
+      await appendManifest(
+        {
+          runId: familyWorkspace.runId,
+          templateId: unit.template.templateId,
+          derivedTaskId: plan.derivedTaskId,
+          phase: "skill-effect",
+          status: skillEffectResult.repairRequired ? "failed" : "completed",
+          draftDir: taskState.draftDir,
+          issues: issueMessages(taskState.skillEffectIssues),
+          metadata: {
+            ...buildScopeMetadata(taskUnit, options.runtimeEnvironment),
+            attemptIndex,
+            cycle,
+            skillEffectAttempt: skillEffectAttemptIndex,
+            skillEffectBucket: skillEffectResult.bucket,
+          },
+        },
+        options.outputRoot,
+      );
+
+      if (!skillEffectResult.repairRequired) {
+        taskState.passed = true;
+        return {
+          status: "published",
+          taskState,
+          attemptWorkspace,
+          issues: [],
+        };
+      }
+
+      if (taskState.repairRoundsUsed < options.maxRepairRounds) {
+        await withAttemptDeadline(plan.derivedTaskId, attemptIndex, "repair", deadlineAt, (signal) =>
+          repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, options.outputRoot, signal),
+        );
+        continue;
+      }
+
+      return {
+        status: "exhausted_repairs",
+        taskState,
+        attemptWorkspace,
+        issues: issueMessages(taskState.skillEffectIssues),
+      };
+    }
+
+    return {
+      status: "exhausted_repairs",
+      taskState,
+      attemptWorkspace,
+      issues: [
+        `${slot.derivedTaskId} attempt-${attemptIndex} 在未通过的情况下耗尽了 max-repair-rounds=${options.maxRepairRounds}`,
+      ],
+    };
+  } catch (error) {
+    if (error instanceof TaskAttemptTimeoutError) {
+      return {
+        status: "timed_out",
+        attemptWorkspace,
+        issues: [error.message],
+      };
+    }
+    throw error;
+  }
 }
 
 async function executeFamilyGeneration(
   unit: GenerationUnit,
   options: ExecuteFamilyOptions,
 ): Promise<FamilyExecutionResult> {
-  const pendingOrdinals = resolvePendingOrdinals(unit);
   const workspace = await createFamilyWorkspace(unit, {
     rawRoot: options.rawRoot,
   });
@@ -444,382 +929,57 @@ async function executeFamilyGeneration(
   });
 
   try {
-    const familyPlanResult = await codex.planFamily(unit, workspace);
-    const plannerIssues = validateFamilyPlan(familyPlanResult.data, {
-      templateId: unit.template.templateId,
-      skillMode: unit.skillMode,
-      similarCount: pendingOrdinals.similarOrdinals.length,
-      transferCount: pendingOrdinals.transferOrdinals.length,
-      targetSkillDirName: unit.targetSkill?.dirName,
-      targetSkillName: unit.targetSkill?.name,
-    });
-    const normalizedFamilyPlan = normalizeFamilyPlan(unit, familyPlanResult.data);
-    const taskPlans = flattenFamilyPlan(normalizedFamilyPlan, pendingOrdinals);
-    const taskPlanIssues = validateTaskPlans(taskPlans, {
-      similarOrdinals: pendingOrdinals.similarOrdinals,
-      transferOrdinals: pendingOrdinals.transferOrdinals,
-    });
-    const initialFamilyObservationIssues = collectFamilyObservationIssues(taskPlans, {
-      similarCount: pendingOrdinals.similarOrdinals.length,
-      transferCount: pendingOrdinals.transferOrdinals.length,
-    });
-    const blockingIssues = [...plannerIssues, ...taskPlanIssues, ...initialFamilyObservationIssues];
+    const slots = buildTaskSlots(unit);
 
-    await writeJson(path.join(workspace.artifactsDir, "family-plan.json"), normalizedFamilyPlan);
-    await writeJson(path.join(workspace.artifactsDir, "family-plan.raw.json"), {
-      threadId: familyPlanResult.threadId,
-      raw: familyPlanResult.raw,
-    });
+    for (const slot of slots) {
+      let finalAttemptState: TaskCycleState | undefined;
+      let finalAttemptWorkspace: TaskAttemptWorkspace | undefined;
+      let finalAttemptIssues: string[] = [];
 
-    await appendRunManifest({
-      runId: workspace.runId,
-      templateId: unit.template.templateId,
-      phase: "planner",
-      status: blockingIssues.length === 0 ? "completed" : "failed",
-      threadId: familyPlanResult.threadId,
-      issues: issueMessages(blockingIssues),
-      metadata: buildScopeMetadata(unit, options.runtimeEnvironment),
-    });
+      for (let attemptIndex = 1; attemptIndex <= options.maxTaskRestarts + 1; attemptIndex += 1) {
+        const attemptResult = await executeTaskAttempt(codex, unit, workspace, slot, attemptIndex, options);
+        finalAttemptState = attemptResult.taskState;
+        finalAttemptWorkspace = attemptResult.attemptWorkspace;
+        finalAttemptIssues = attemptResult.issues;
 
-    if (blockingIssues.length > 0) {
-      const issues = issueMessages(blockingIssues);
-      await writeWorkspaceSummary({
-        templateId: unit.template.templateId,
-        status: "failed",
-        issues,
-        outputRoot: options.outputRoot,
-        workspace,
-      });
-      return {
-        templateId: unit.template.templateId,
-        skillMode: unit.skillMode,
-        scopeSlug: unit.scopeSlug,
-        targetSkillDirName: unit.targetSkill?.dirName,
-        targetSkillName: unit.targetSkill?.name,
-        runtimeEnvironment: options.runtimeEnvironment,
-        runId: workspace.runId,
-        status: "failed",
-        issues,
-        publishedTaskIds: [],
-        failedTaskIds: [],
-        publishedVariantDirs: [],
-        failedTaskRefs: [],
-        skillEffectResults: [],
-        skillEffectBucketCounts: {},
-        workspace,
-      };
-    }
-
-    taskPlans.sort(compareTaskPlansForExecution);
-
-    for (const plan of taskPlans) {
-      const draftDir = await prepareDraftSkeleton(workspace, plan);
-      const writerResult = await codex.writeTask(unit, workspace, plan);
-      await writeJson(path.join(workspace.artifactsDir, `${plan.derivedTaskId}.writer.json`), writerResult.data);
-      await writeJson(path.join(workspace.artifactsDir, `${plan.derivedTaskId}.writer.raw.json`), {
-        threadId: writerResult.threadId,
-        raw: writerResult.raw,
-      });
-      await appendRunManifest({
-        runId: workspace.runId,
-        templateId: unit.template.templateId,
-        derivedTaskId: plan.derivedTaskId,
-        phase: "writer",
-        status: "completed",
-        threadId: writerResult.threadId,
-        draftDir,
-        metadata: buildScopeMetadata(unit, options.runtimeEnvironment),
-      });
-
-      const taskState: TaskCycleState = {
-        plan,
-        draftDir,
-        writerSummary: writerResult.data,
-        repairThreadId: null,
-        repairRoundsUsed: 0,
-        runtimeAttemptCount: 0,
-        skillEffectAttemptCount: 0,
-        lastMutatedCycle: null,
-        runtimePassedCycle: null,
-        skillEffectAcceptedCycle: null,
-        acceptedWithSkillVariantDir: undefined,
-        acceptedNoSkillVariantDir: undefined,
-        blockingIssues: [],
-        staticIssues: [],
-        runtimeIssues: [],
-        skillEffectIssues: [],
-        passed: false,
-      };
-
-      for (let cycle = 0; cycle <= options.maxRepairRounds; cycle += 1) {
-        const reviewResult = await codex.reviewTaskBlocking(unit, workspace, normalizedFamilyPlan, plan);
-        const reviewValidation = validateBlockingReviewResult([plan], reviewResult.data);
-        await writeJson(path.join(workspace.artifactsDir, `${plan.derivedTaskId}.review.round-${cycle}.json`), reviewResult.data);
-        await writeJson(path.join(workspace.artifactsDir, `${plan.derivedTaskId}.review.round-${cycle}.raw.json`), {
-          threadId: reviewResult.threadId,
-          raw: reviewResult.raw,
-        });
-
-        taskState.blockingIssues = reviewValidation.taskIssuesById.get(plan.derivedTaskId) ?? [];
-        taskState.staticIssues = await validateDraftStatic(taskState.draftDir, plan, unit);
-        taskState.runtimeIssues = [];
-        taskState.skillEffectIssues = [];
-        taskState.acceptedWithSkillVariantDir = undefined;
-        taskState.acceptedNoSkillVariantDir = undefined;
-        taskState.passed = false;
-
-        const preRuntimeIssues = [...taskState.blockingIssues, ...taskState.staticIssues];
         await appendRunManifest({
           runId: workspace.runId,
           templateId: unit.template.templateId,
-          derivedTaskId: plan.derivedTaskId,
-          phase: "validate",
-          status: preRuntimeIssues.length === 0 ? "completed" : "failed",
-          draftDir: taskState.draftDir,
-          issues: issueMessages(preRuntimeIssues),
+          derivedTaskId: slot.derivedTaskId,
+          phase: "task-attempt",
+          status: attemptResult.status === "published" ? "completed" : "failed",
+          draftDir: attemptResult.taskState?.draftDir ?? attemptResult.attemptWorkspace.draftDir,
+          issues: attemptResult.issues,
           metadata: {
-            ...buildScopeMetadata(unit, options.runtimeEnvironment),
-            cycle,
+            ...buildScopeMetadata(buildSingleTaskUnit(unit, slot), options.runtimeEnvironment),
+            attemptIndex,
+            attemptStatus: attemptResult.status,
           },
         });
 
-        if (preRuntimeIssues.length > 0) {
-          taskState.runtimeEvidence = undefined;
-          taskState.skillEffectEvaluation = undefined;
-          taskState.skillEffectResultPath = undefined;
-          taskState.runtimePassedCycle = null;
-          taskState.skillEffectAcceptedCycle = null;
-          if (taskState.repairRoundsUsed < options.maxRepairRounds) {
-            await repairTaskDraft(codex, unit, workspace, taskState, cycle, options.outputRoot);
-            continue;
-          }
-          break;
-        }
-
-        const runtimeAttemptIndex = taskState.runtimeAttemptCount + 1;
-        const runtimeResult = await runRuntimeValidation(
-          workspace,
-          plan,
-          options.runtimeEnvironment,
-          cycle,
-          runtimeAttemptIndex,
-        );
-        taskState.runtimeAttemptCount = runtimeAttemptIndex;
-        taskState.runtimeIssues = runtimeResult.issues;
-        taskState.runtimeEvidence = runtimeResult.evidence;
-        await writeJson(
-          path.join(workspace.artifactsDir, `${plan.derivedTaskId}.runtime.cycle-${cycle}.attempt-${runtimeAttemptIndex}.json`),
-          {
-            passed: runtimeResult.passed,
-            failureKind: runtimeResult.failureKind,
-            issues: issueMessages(runtimeResult.issues),
-            evidence: runtimeResult.evidence,
-          },
-        );
-        await writeJson(path.join(workspace.artifactsDir, `${plan.derivedTaskId}.runtime.cycle-${cycle}.json`), {
-          passed: runtimeResult.passed,
-          failureKind: runtimeResult.failureKind,
-          issues: issueMessages(runtimeResult.issues),
-          evidence: runtimeResult.evidence,
-        });
-
-        if (!runtimeResult.passed) {
-          taskState.runtimePassedCycle = null;
-          taskState.skillEffectAcceptedCycle = null;
-          taskState.skillEffectEvaluation = undefined;
-          taskState.skillEffectResultPath = undefined;
-          taskState.acceptedWithSkillVariantDir = undefined;
-          taskState.acceptedNoSkillVariantDir = undefined;
-          await appendRunManifest({
-            runId: workspace.runId,
-            templateId: unit.template.templateId,
-            derivedTaskId: plan.derivedTaskId,
-            phase: "validate",
-            status: "failed",
-            draftDir: taskState.draftDir,
-            issues: issueMessages(runtimeResult.issues),
-            metadata: {
-              ...buildScopeMetadata(unit, options.runtimeEnvironment),
-              cycle,
-              runtimeAttempt: runtimeAttemptIndex,
-              runtimeFailureKind: runtimeResult.failureKind,
-            },
-          });
-
-          if (taskState.repairRoundsUsed < options.maxRepairRounds) {
-            await repairTaskDraft(codex, unit, workspace, taskState, cycle, options.outputRoot);
-            continue;
-          }
-          break;
-        }
-
-        taskState.runtimePassedCycle = cycle;
-
-        if (!options.skillEffectEnabled) {
-          taskState.acceptedWithSkillVariantDir = taskState.draftDir;
-          taskState.acceptedNoSkillVariantDir = undefined;
-          taskState.passed = true;
-          break;
-        }
-
-        const skillEffectAttemptIndex = taskState.skillEffectAttemptCount + 1;
-        const skillEffectResult = await runSkillEffectEvaluation({
-          workspace,
-          plan,
-          runtimeEnvironment: options.runtimeEnvironment,
-          cycle,
-          attemptIndex: skillEffectAttemptIndex,
-          draftTaskDir: taskState.draftDir,
-          modelName: options.skillEffectModel,
-          apiKey: options.skillEffectApiKey,
-          baseUrl: options.skillEffectBaseUrl,
-        });
-        taskState.skillEffectAttemptCount = skillEffectAttemptIndex;
-        taskState.skillEffectEvaluation = skillEffectResult;
-        taskState.skillEffectIssues = buildSkillEffectIssues(plan.derivedTaskId, skillEffectResult);
-        taskState.skillEffectAcceptedCycle = skillEffectResult.repairRequired ? null : cycle;
-        taskState.acceptedWithSkillVariantDir = skillEffectResult.repairRequired
-          ? undefined
-          : skillEffectResult.withSkill.evidence.variantTaskDir;
-        taskState.acceptedNoSkillVariantDir = skillEffectResult.repairRequired
-          ? undefined
-          : skillEffectResult.noSkill.evidence.variantTaskDir;
-        taskState.skillEffectResultPath = await writeSkillEffectResultArtifact({
-          artifactsDir: workspace.artifactsDir,
-          derivedTaskId: plan.derivedTaskId,
-          cycle,
-          attemptIndex: skillEffectAttemptIndex,
-          result: skillEffectResult,
-        });
-        await appendRunManifest({
-          runId: workspace.runId,
-          templateId: unit.template.templateId,
-          derivedTaskId: plan.derivedTaskId,
-          phase: "skill-effect",
-          status: skillEffectResult.repairRequired ? "failed" : "completed",
-          draftDir: taskState.draftDir,
-          issues: issueMessages(taskState.skillEffectIssues),
-          metadata: {
-            ...buildScopeMetadata(unit, options.runtimeEnvironment),
-            cycle,
-            skillEffectAttempt: skillEffectAttemptIndex,
-            skillEffectBucket: skillEffectResult.bucket,
-          },
-        });
-
-        if (!skillEffectResult.repairRequired) {
-          taskState.passed = true;
-          break;
-        }
-
-        if (taskState.repairRoundsUsed < options.maxRepairRounds) {
-          await repairTaskDraft(codex, unit, workspace, taskState, cycle, options.outputRoot);
-          continue;
-        }
-        break;
-      }
-
-      if (taskState.skillEffectEvaluation) {
-        skillEffectResults.push({
-          derivedTaskId: plan.derivedTaskId,
-          bucket: taskState.skillEffectEvaluation.bucket,
-          repairRequired: taskState.skillEffectEvaluation.repairRequired,
-          withSkillPassed: taskState.skillEffectEvaluation.withSkill.passed,
-          withSkillReward: taskState.skillEffectEvaluation.withSkill.evidence.reward ?? null,
-          withSkillSummary: taskState.skillEffectEvaluation.withSkill.evidence.summary,
-          noSkillPassed: taskState.skillEffectEvaluation.noSkill.passed,
-          noSkillReward: taskState.skillEffectEvaluation.noSkill.evidence.reward ?? null,
-          noSkillSummary: taskState.skillEffectEvaluation.noSkill.evidence.summary,
-          noSkillComparisonStatus: taskState.skillEffectEvaluation.noSkill.comparisonStatus,
-          noSkillComparisonReason: taskState.skillEffectEvaluation.noSkill.comparisonReason,
-          withSkillVariantDir: taskState.skillEffectEvaluation.withSkill.evidence.variantTaskDir,
-          noSkillVariantDir: taskState.skillEffectEvaluation.noSkill.evidence.variantTaskDir,
-        });
-        recordSkillEffectBucketCount(skillEffectBucketCounts, taskState.skillEffectEvaluation.bucket);
-      }
-
-      if (taskState.passed) {
-        const withSkillSourceDir = taskState.acceptedWithSkillVariantDir ?? taskState.draftDir;
-        const withSkillTargetDir = buildPublishedVariantTaskDir({
-          targetRoot: options.finalRoot,
-          templateId: unit.template.templateId,
-          scopeSlug: unit.scopeSlug,
-          taskName: plan.derivedTaskId,
-          variant: "with_skill",
-        });
-        const withSkillResult = await sanitizeAndCopyTask({
-          sourceDraftDir: withSkillSourceDir,
-          templateId: unit.template.templateId,
-          scopeSlug: unit.scopeSlug,
-          taskName: `${plan.derivedTaskId}__with_skill`,
-          rawRoot: options.rawRoot,
-          targetRoot: options.finalRoot,
-        });
-        let noSkillTargetDir: string | null = null;
-        if (taskState.acceptedNoSkillVariantDir) {
-          noSkillTargetDir = buildPublishedVariantTaskDir({
+        if (attemptResult.status === "published") {
+          const taskState = attemptResult.taskState;
+          const plan = taskState.plan;
+          const withSkillSourceDir = taskState.acceptedWithSkillVariantDir ?? taskState.draftDir;
+          const withSkillTargetDir = buildPublishedVariantTaskDir({
             targetRoot: options.finalRoot,
-            templateId: unit.template.templateId,
-            scopeSlug: unit.scopeSlug,
-            taskName: plan.derivedTaskId,
-            variant: "no_skill",
-          });
-          await sanitizeAndCopyTask({
-            sourceDraftDir: taskState.acceptedNoSkillVariantDir,
-            templateId: unit.template.templateId,
-            scopeSlug: unit.scopeSlug,
-            taskName: `${plan.derivedTaskId}__no_skill`,
-            rawRoot: options.rawRoot,
-            targetRoot: options.finalRoot,
-          });
-        }
-        publishedTaskIds.push(plan.derivedTaskId);
-        publishedVariantDirs.push({
-          derivedTaskId: plan.derivedTaskId,
-          withSkillDir: withSkillTargetDir,
-          noSkillDir: noSkillTargetDir,
-          bucketWithSkillDir: null,
-          bucketNoSkillDir: null,
-        });
-        upsertPublishedTask(unit, buildPublishedTaskInfo(plan, withSkillResult.targetTaskDir));
-        await appendRunManifest({
-          runId: workspace.runId,
-          templateId: unit.template.templateId,
-          derivedTaskId: plan.derivedTaskId,
-          phase: "publish",
-          status: "completed",
-          draftDir: taskState.draftDir,
-          publishedDir: withSkillResult.targetTaskDir,
-          metadata: {
-            ...buildScopeMetadata(unit, options.runtimeEnvironment),
-            publishDisposition: withSkillResult.disposition,
-            publishedNoSkillDir: noSkillTargetDir,
-            withSkillVariantSourceDir: withSkillSourceDir,
-            noSkillVariantSourceDir: taskState.acceptedNoSkillVariantDir,
-          },
-        });
-
-        if (taskState.skillEffectEvaluation) {
-          const bucketRoot = buildSkillEffectBucketRoot(options.finalRoot, taskState.skillEffectEvaluation.bucket);
-          const bucketWithSkillDir = buildPublishedVariantTaskDir({
-            targetRoot: bucketRoot,
             templateId: unit.template.templateId,
             scopeSlug: unit.scopeSlug,
             taskName: plan.derivedTaskId,
             variant: "with_skill",
           });
-          const bucketWithSkillResult = await sanitizeAndCopyTask({
+          const withSkillResult = await sanitizeAndCopyTask({
             sourceDraftDir: withSkillSourceDir,
             templateId: unit.template.templateId,
             scopeSlug: unit.scopeSlug,
             taskName: `${plan.derivedTaskId}__with_skill`,
             rawRoot: options.rawRoot,
-            targetRoot: bucketRoot,
+            targetRoot: options.finalRoot,
           });
-          let bucketNoSkillDir: string | null = null;
+          let noSkillTargetDir: string | null = null;
           if (taskState.acceptedNoSkillVariantDir) {
-            bucketNoSkillDir = buildPublishedVariantTaskDir({
-              targetRoot: bucketRoot,
+            noSkillTargetDir = buildPublishedVariantTaskDir({
+              targetRoot: options.finalRoot,
               templateId: unit.template.templateId,
               scopeSlug: unit.scopeSlug,
               taskName: plan.derivedTaskId,
@@ -831,58 +991,148 @@ async function executeFamilyGeneration(
               scopeSlug: unit.scopeSlug,
               taskName: `${plan.derivedTaskId}__no_skill`,
               rawRoot: options.rawRoot,
-              targetRoot: bucketRoot,
+              targetRoot: options.finalRoot,
             });
           }
-          publishedVariantDirs[publishedVariantDirs.length - 1] = {
-            ...publishedVariantDirs[publishedVariantDirs.length - 1]!,
-            bucketWithSkillDir,
-            bucketNoSkillDir,
-          };
+          publishedTaskIds.push(plan.derivedTaskId);
+          publishedVariantDirs.push({
+            derivedTaskId: plan.derivedTaskId,
+            withSkillDir: withSkillTargetDir,
+            noSkillDir: noSkillTargetDir,
+            bucketWithSkillDir: null,
+            bucketNoSkillDir: null,
+          });
+          upsertPublishedTask(unit, buildPublishedTaskInfo(plan, withSkillResult.targetTaskDir));
+          removePendingSlot(unit, slot);
           await appendRunManifest({
             runId: workspace.runId,
             templateId: unit.template.templateId,
             derivedTaskId: plan.derivedTaskId,
-            phase: "skill-effect-bucket",
+            phase: "publish",
             status: "completed",
             draftDir: taskState.draftDir,
-            publishedDir: bucketWithSkillResult.targetTaskDir,
+            publishedDir: withSkillResult.targetTaskDir,
             metadata: {
-              ...buildScopeMetadata(unit, options.runtimeEnvironment),
-              skillEffectBucket: taskState.skillEffectEvaluation.bucket,
-              publishDisposition: bucketWithSkillResult.disposition,
-              bucketTarget: "final",
-              publishedNoSkillDir: bucketNoSkillDir,
+              ...buildScopeMetadata(buildSingleTaskUnit(unit, slot), options.runtimeEnvironment),
+              attemptIndex: taskState.attemptIndex,
+              publishDisposition: withSkillResult.disposition,
+              publishedNoSkillDir: noSkillTargetDir,
+              withSkillVariantSourceDir: withSkillSourceDir,
+              noSkillVariantSourceDir: taskState.acceptedNoSkillVariantDir,
             },
           });
+
+          if (taskState.skillEffectEvaluation) {
+            const bucketRoot = buildSkillEffectBucketRoot(options.finalRoot, taskState.skillEffectEvaluation.bucket);
+            const bucketWithSkillDir = buildPublishedVariantTaskDir({
+              targetRoot: bucketRoot,
+              templateId: unit.template.templateId,
+              scopeSlug: unit.scopeSlug,
+              taskName: plan.derivedTaskId,
+              variant: "with_skill",
+            });
+            const bucketWithSkillResult = await sanitizeAndCopyTask({
+              sourceDraftDir: withSkillSourceDir,
+              templateId: unit.template.templateId,
+              scopeSlug: unit.scopeSlug,
+              taskName: `${plan.derivedTaskId}__with_skill`,
+              rawRoot: options.rawRoot,
+              targetRoot: bucketRoot,
+            });
+            let bucketNoSkillDir: string | null = null;
+            if (taskState.acceptedNoSkillVariantDir) {
+              bucketNoSkillDir = buildPublishedVariantTaskDir({
+                targetRoot: bucketRoot,
+                templateId: unit.template.templateId,
+                scopeSlug: unit.scopeSlug,
+                taskName: plan.derivedTaskId,
+                variant: "no_skill",
+              });
+              await sanitizeAndCopyTask({
+                sourceDraftDir: taskState.acceptedNoSkillVariantDir,
+                templateId: unit.template.templateId,
+                scopeSlug: unit.scopeSlug,
+                taskName: `${plan.derivedTaskId}__no_skill`,
+                rawRoot: options.rawRoot,
+                targetRoot: bucketRoot,
+              });
+            }
+            publishedVariantDirs[publishedVariantDirs.length - 1] = {
+              ...publishedVariantDirs[publishedVariantDirs.length - 1]!,
+              bucketWithSkillDir,
+              bucketNoSkillDir,
+            };
+            await appendRunManifest({
+              runId: workspace.runId,
+              templateId: unit.template.templateId,
+              derivedTaskId: plan.derivedTaskId,
+              phase: "skill-effect-bucket",
+              status: "completed",
+              draftDir: taskState.draftDir,
+              publishedDir: bucketWithSkillResult.targetTaskDir,
+              metadata: {
+                ...buildScopeMetadata(buildSingleTaskUnit(unit, slot), options.runtimeEnvironment),
+                attemptIndex: taskState.attemptIndex,
+                skillEffectBucket: taskState.skillEffectEvaluation.bucket,
+                publishDisposition: bucketWithSkillResult.disposition,
+                bucketTarget: "final",
+                publishedNoSkillDir: bucketNoSkillDir,
+              },
+            });
+          }
+          break;
         }
-        continue;
+
+        if (attemptIndex <= options.maxTaskRestarts) {
+          continue;
+        }
+
+        failedTaskIds.push(slot.derivedTaskId);
+        failedTaskRefs.push(
+          buildFailedTaskRef(
+            slot.derivedTaskId,
+            finalAttemptState?.draftDir ?? finalAttemptWorkspace?.draftDir ?? workspace.rootDir,
+            finalAttemptState,
+          ),
+        );
+        finalIssues.push(...finalAttemptIssues);
+        await appendRunManifest({
+          runId: workspace.runId,
+          templateId: unit.template.templateId,
+          derivedTaskId: slot.derivedTaskId,
+          phase: "publish",
+          status: "failed",
+          draftDir: finalAttemptState?.draftDir ?? finalAttemptWorkspace?.draftDir,
+          issues: finalAttemptIssues,
+          metadata: {
+            ...buildScopeMetadata(buildSingleTaskUnit(unit, slot), options.runtimeEnvironment),
+            attemptIndex,
+            latestRuntimeResultPath: finalAttemptState?.runtimeEvidence?.resultPath,
+            latestSkillEffectResultPath: finalAttemptState?.skillEffectResultPath,
+            latestSkillEffectPairRoot: finalAttemptState?.skillEffectEvaluation?.pairRoot,
+          },
+        });
       }
 
-      const failedTaskIssues = [
-        ...issueMessages(taskState.blockingIssues),
-        ...issueMessages(taskState.staticIssues),
-        ...issueMessages(taskState.runtimeIssues),
-        ...issueMessages(taskState.skillEffectIssues),
-      ];
-      failedTaskIds.push(plan.derivedTaskId);
-      failedTaskRefs.push(buildFailedTaskRef(taskState));
-      finalIssues.push(...failedTaskIssues);
-      await appendRunManifest({
-        runId: workspace.runId,
-        templateId: unit.template.templateId,
-        derivedTaskId: plan.derivedTaskId,
-        phase: "publish",
-        status: "failed",
-        draftDir: taskState.draftDir,
-        issues: failedTaskIssues,
-        metadata: {
-          ...buildScopeMetadata(unit, options.runtimeEnvironment),
-          latestRuntimeResultPath: taskState.runtimeEvidence?.resultPath,
-          latestSkillEffectResultPath: taskState.skillEffectResultPath,
-          latestSkillEffectPairRoot: taskState.skillEffectEvaluation?.pairRoot,
-        },
-      });
+      if (finalAttemptState?.skillEffectEvaluation) {
+        const evaluation = finalAttemptState.skillEffectEvaluation;
+        skillEffectResults.push({
+          derivedTaskId: finalAttemptState.plan.derivedTaskId,
+          bucket: evaluation.bucket,
+          repairRequired: evaluation.repairRequired,
+          withSkillPassed: evaluation.withSkill.passed,
+          withSkillReward: evaluation.withSkill.evidence.reward ?? null,
+          withSkillSummary: evaluation.withSkill.evidence.summary,
+          noSkillPassed: evaluation.noSkill.passed,
+          noSkillReward: evaluation.noSkill.evidence.reward ?? null,
+          noSkillSummary: evaluation.noSkill.evidence.summary,
+          noSkillComparisonStatus: evaluation.noSkill.comparisonStatus,
+          noSkillComparisonReason: evaluation.noSkill.comparisonReason,
+          withSkillVariantDir: evaluation.withSkill.evidence.variantTaskDir,
+          noSkillVariantDir: evaluation.noSkill.evidence.variantTaskDir,
+        });
+        recordSkillEffectBucketCount(skillEffectBucketCounts, evaluation.bucket);
+      }
     }
 
     const status: FamilyExecutionResult["status"] = failedTaskIds.length === 0 ? "completed" : "failed";
@@ -1099,6 +1349,12 @@ async function main(): Promise<void> {
     runtimeEnvironment,
     maxRepairRounds: getNumberOption(options, "max-repair-rounds", 2),
     codexRunRetries: getNonNegativeIntegerOption(options, "codex-run-retries", 3),
+    taskAttemptTimeoutHours: parseNonNegativeNumber(
+      getStringOption(options, "task-attempt-timeout-hours"),
+      "--task-attempt-timeout-hours",
+      2,
+    ),
+    maxTaskRestarts: getNonNegativeIntegerOption(options, "max-task-restarts", 1),
     skillEffectEnabled,
     skillEffectModel,
     skillEffectApiKey: process.env.OPENAI_API_KEY?.trim() ?? "",

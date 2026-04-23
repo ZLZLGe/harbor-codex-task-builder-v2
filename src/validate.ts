@@ -1,9 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { buildRoleDisplayName, relativeDraftPath } from "./prompts.js";
-import { getVisibleSkills, type GenerationUnit, type SkillMode } from "./discovery.js";
-import type { BlockingReviewResult, DerivedTaskPlan, FamilyPlan } from "./schema.js";
-import type { FamilyWorkspace } from "./workspace.js";
+import { buildRoleDisplayName } from "./prompts.js";
+import { getVisibleSkills, type GenerationUnit } from "./discovery.js";
+import type { BlockingReviewResult, DerivedTaskPlan } from "./schema.js";
 import {
   canonicalTaskName,
   copyFile,
@@ -97,6 +96,12 @@ const AGENT_SKILL_DESTINATION_ALLOWLIST = new Set([
 type RuntimeLogEntry = {
   label: string;
   path: string;
+};
+
+type RuntimeWorkspace = {
+  runId: string;
+  rootDir: string;
+  artifactsDir: string;
 };
 
 function containsCjkCharacters(text: string): boolean {
@@ -228,65 +233,6 @@ function runtimeIssue(taskId: string, message: string): ValidationIssue {
   };
 }
 
-export function validateFamilyPlan(
-  familyPlan: FamilyPlan,
-  options: {
-    templateId: string;
-    skillMode: SkillMode;
-    similarCount: number;
-    transferCount: number;
-    targetSkillDirName?: string | null;
-    targetSkillName?: string | null;
-  },
-): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-
-  if (familyPlan.templateId !== options.templateId) {
-    issues.push({
-      scope: "family",
-      message: `planner 返回的 templateId=${familyPlan.templateId} 与输入 ${options.templateId} 不一致`,
-    });
-  }
-
-  if (familyPlan.skillMode !== options.skillMode) {
-    issues.push({
-      scope: "family",
-      message: `planner 返回的 skillMode=${familyPlan.skillMode} 与输入 ${options.skillMode} 不一致`,
-    });
-  }
-
-  if (familyPlan.similarTasks.length !== options.similarCount) {
-    issues.push({
-      scope: "family",
-      message: `similarTasks 数量错误，期望 ${options.similarCount}，实际 ${familyPlan.similarTasks.length}`,
-    });
-  }
-
-  if (familyPlan.transferTasks.length !== options.transferCount) {
-    issues.push({
-      scope: "family",
-      message: `transferTasks 数量错误，期望 ${options.transferCount}，实际 ${familyPlan.transferTasks.length}`,
-    });
-  }
-
-  if (options.skillMode === "per-skill") {
-    if (familyPlan.targetSkillDirName !== (options.targetSkillDirName ?? "")) {
-      issues.push({
-        scope: "family",
-        message: `planner 返回的 targetSkillDirName=${familyPlan.targetSkillDirName} 与输入不一致`,
-      });
-    }
-    if (familyPlan.targetSkillName !== (options.targetSkillName ?? "")) {
-      issues.push({
-        scope: "family",
-        message: `planner 返回的 targetSkillName=${familyPlan.targetSkillName} 与输入不一致`,
-      });
-    }
-  }
-
-  return issues;
-}
-
 export function validateTaskPlans(
   taskPlans: DerivedTaskPlan[],
   options: {
@@ -296,14 +242,9 @@ export function validateTaskPlans(
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const ids = taskPlans.map((task) => task.derivedTaskId);
-  const outputs = taskPlans.map((task) => task.primaryOutputFile);
 
   if (new Set(ids).size !== ids.length) {
     issues.push({ scope: "family", message: "derivedTaskId 存在重复" });
-  }
-
-  if (new Set(outputs).size !== outputs.length) {
-    issues.push({ scope: "family", message: "primaryOutputFile 存在重复" });
   }
 
   const similarTasks = taskPlans.filter((task) => task.taskRole === "similar");
@@ -893,7 +834,6 @@ export async function validateDraftStatic(
     const metadataAuthorEmail = metadata.stringValues.get("author_email");
     const metadataDifficulty = metadata.stringValues.get("difficulty");
     const metadataCategory = metadata.stringValues.get("category");
-    const metadataPrimaryOutputFile = metadata.stringValues.get("primary_output_file");
     const metadataSourceTemplateId = metadata.stringValues.get("source_template_id");
     const metadataTaskRole = metadata.stringValues.get("task_role");
     const metadataTags = metadata.arrayValues.get("tags");
@@ -945,14 +885,6 @@ export async function validateDraftStatic(
         scope: "static",
         taskId: plan.derivedTaskId,
         message: "task.toml metadata.description 必须使用英文描述，不能包含中文",
-      });
-    }
-
-    if (metadataPrimaryOutputFile !== plan.primaryOutputFile) {
-      issues.push({
-        scope: "static",
-        taskId: plan.derivedTaskId,
-        message: `task.toml metadata.primary_output_file=${metadataPrimaryOutputFile ?? "missing"} 与 blueprint 不一致`,
       });
     }
 
@@ -1282,21 +1214,22 @@ export async function runRuntimePreflight(
 }
 
 export async function runRuntimeValidation(
-  workspace: FamilyWorkspace,
+  workspace: RuntimeWorkspace,
   plan: DerivedTaskPlan,
   runtimeEnvironment: RuntimeEnvironment,
   cycle: number,
   attemptIndex: number,
+  draftTaskDir: string,
   env: NodeJS.ProcessEnv = process.env,
+  signal?: AbortSignal,
 ): Promise<RuntimeValidationResult> {
   const taskRuntimeRoot = path.join(workspace.artifactsDir, "runtime", plan.derivedTaskId);
   const logsDir = path.join(taskRuntimeRoot, `cycle-${cycle}-attempt-${attemptIndex}`);
   const logFilePath = path.join(logsDir, "harbor-run.log");
   const runtimeLogIndexPath = path.join(logsDir, "log-index.json");
   const jobName = `harbor-oracle-${slugify(workspace.runId)}-${slugify(plan.derivedTaskId)}-cycle-${cycle}-attempt-${attemptIndex}`;
-  const taskDir = path.join(workspace.rootDir, relativeDraftPath(plan.derivedTaskId));
   const command = buildHarborRuntimeCommand({
-    taskDir,
+    taskDir: draftTaskDir,
     logsDir,
     jobName,
     runtimeEnvironment,
@@ -1348,6 +1281,7 @@ export async function runRuntimeValidation(
     onStderr: (chunk) => {
       process.stderr.write(chunk);
     },
+    signal,
   });
 
   const jobDir = path.join(logsDir, jobName);

@@ -7,34 +7,37 @@ import type {
   BlockingReviewResult,
   BlockingReviewerTaskResult,
   DerivedTaskPlan,
-  FamilyPlan,
+  SingleTaskPlan,
   RepairTurnResult,
   WriterSummary,
 } from "./schema.js";
 import {
   blockingReviewResultJsonSchema,
   blockingReviewResultSchema,
-  familyPlanJsonSchema,
-  familyPlanSchema,
   repairTurnResultJsonSchema,
   repairTurnResultSchema,
+  singleTaskPlanJsonSchema,
+  singleTaskPlanSchema,
   writerSummaryJsonSchema,
   writerSummarySchema,
 } from "./schema.js";
 import { parseJsonWithFallback, pathExists } from "./utils.js";
 import {
   buildBlockingReviewerPrompt,
-  buildFamilyPlannerPrompt,
   buildRepairPrompt,
+  buildSingleTaskPlannerPrompt,
   buildTaskWriterPrompt,
   relativeDraftPath,
 } from "./prompts.js";
-import type { FamilyWorkspace } from "./workspace.js";
 
 type StructuredRunResult<T> = {
   data: T;
   threadId: string | null;
   raw: string;
+};
+
+type WorkspaceRootProvider = {
+  rootDir: string;
 };
 
 type CodexThreadRunner = {
@@ -55,7 +58,6 @@ const writerSummaryPartialSchema = z
   .object({
     derivedTaskId: z.string().optional(),
     draftRelativePath: z.string().optional(),
-    primaryOutputFile: z.string().optional(),
     filesWritten: z.array(z.string()).optional(),
     summary: z.string().optional(),
   })
@@ -319,7 +321,7 @@ async function listFilesRecursively(
 }
 
 async function inferWriterFilesWritten(
-  workspace: FamilyWorkspace,
+  workspace: WorkspaceRootProvider,
   derivedTaskId: string,
   draftRelativePathValue: string,
 ): Promise<string[]> {
@@ -411,10 +413,38 @@ export class CodexTaskBuilderClient {
     return threadId ? this.codex.resumeThread(threadId, options) : this.codex.startThread(options);
   }
 
+  private async sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) {
+      await this.sleep(ms);
+      return;
+    }
+    if (signal.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error("操作已中断");
+    }
+    let abortListener: (() => void) | undefined;
+    await Promise.race([
+      this.sleep(ms),
+      new Promise<never>((_, reject) => {
+        abortListener = () => {
+          reject(signal.reason instanceof Error ? signal.reason : new Error("操作已中断"));
+        };
+        signal.addEventListener("abort", abortListener, {
+          once: true,
+        });
+      }),
+    ]);
+    if (abortListener) {
+      signal.removeEventListener("abort", abortListener);
+    }
+  }
+
   private async runThreadWithRetries<T>(
     label: string,
     createThread: () => CodexThreadRunner,
     execute: (thread: CodexThreadRunner) => Promise<T>,
+    options: {
+      signal?: AbortSignal;
+    } = {},
   ): Promise<{ result: T; threadId: string | null }> {
     let retryCount = 0;
 
@@ -427,6 +457,9 @@ export class CodexTaskBuilderClient {
           threadId: thread.id,
         };
       } catch (error) {
+        if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+          throw error;
+        }
         if (retryCount >= this.codexRunRetries) {
           throw error;
         }
@@ -436,21 +469,30 @@ export class CodexTaskBuilderClient {
         console.warn(
           `[codex-retry:${label}] 第 ${retryCount}/${this.codexRunRetries} 次重试，${delayMs / 1000}s 后重试：${compactErrorMessage(error)}`,
         );
-        await this.sleep(delayMs);
+        await this.sleepWithSignal(delayMs, options.signal);
       }
     }
   }
 
-  async planFamily(unit: GenerationUnit, workspace: FamilyWorkspace): Promise<StructuredRunResult<FamilyPlan>> {
+  async planTask(
+    unit: GenerationUnit,
+    workspace: WorkspaceRootProvider,
+    plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskRole" | "roleOrdinal">,
+    options: {
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<StructuredRunResult<SingleTaskPlan>> {
     const { result: turn, threadId } = await this.runThreadWithRetries(
-      "plan-family",
+      "plan-task",
       () => this.makeThread(workspace.rootDir),
       async (thread) =>
-        thread.run(buildFamilyPlannerPrompt(unit), {
-          outputSchema: familyPlanJsonSchema,
+        thread.run(buildSingleTaskPlannerPrompt(unit, plan), {
+          outputSchema: singleTaskPlanJsonSchema,
+          signal: options.signal,
         }),
+      options,
     );
-    const parsed = familyPlanSchema.parse(parseJsonWithFallback<FamilyPlan>(turn.finalResponse));
+    const parsed = singleTaskPlanSchema.parse(parseJsonWithFallback<SingleTaskPlan>(turn.finalResponse));
     return {
       data: parsed,
       threadId,
@@ -460,16 +502,22 @@ export class CodexTaskBuilderClient {
 
   async writeTask(
     unit: GenerationUnit,
-    workspace: FamilyWorkspace,
+    workspace: WorkspaceRootProvider,
     plan: DerivedTaskPlan,
+    options: {
+      signal?: AbortSignal;
+      draftDirLabel?: string;
+    } = {},
   ): Promise<StructuredRunResult<WriterSummary>> {
     const { result: turn, threadId } = await this.runThreadWithRetries(
       "write-task",
       () => this.makeThread(workspace.rootDir),
       async (thread) =>
-        thread.run(buildTaskWriterPrompt(unit, plan), {
+        thread.run(buildTaskWriterPrompt(unit, plan, { draftDirLabel: options.draftDirLabel }), {
           outputSchema: writerSummaryJsonSchema,
+          signal: options.signal,
         }),
+      options,
     );
 
     let parsedValue: unknown | null = null;
@@ -496,9 +544,7 @@ export class CodexTaskBuilderClient {
     const draftRelativePathValue =
       partial?.success && partial.data.draftRelativePath
         ? partial.data.draftRelativePath
-        : relativeDraftPath(derivedTaskId);
-    const primaryOutputFile =
-      partial?.success && partial.data.primaryOutputFile ? partial.data.primaryOutputFile : plan.primaryOutputFile;
+        : options.draftDirLabel?.replace(/\/$/, "") || relativeDraftPath(derivedTaskId);
     const filesWritten =
       partial?.success && partial.data.filesWritten && partial.data.filesWritten.length > 0
         ? partial.data.filesWritten
@@ -512,7 +558,6 @@ export class CodexTaskBuilderClient {
       data: {
         derivedTaskId,
         draftRelativePath: draftRelativePathValue,
-        primaryOutputFile,
         filesWritten,
         summary,
       },
@@ -523,17 +568,22 @@ export class CodexTaskBuilderClient {
 
   async reviewTaskBlocking(
     unit: GenerationUnit,
-    workspace: FamilyWorkspace,
-    familyPlan: FamilyPlan,
+    workspace: WorkspaceRootProvider,
     plan: DerivedTaskPlan,
+    options: {
+      signal?: AbortSignal;
+      draftDirLabel?: string;
+    } = {},
   ): Promise<StructuredRunResult<BlockingReviewResult>> {
     const { result: turn, threadId } = await this.runThreadWithRetries(
       "review-task-blocking",
       () => this.makeThread(workspace.rootDir),
       async (thread) =>
-        thread.run(buildBlockingReviewerPrompt(unit, familyPlan, plan), {
+        thread.run(buildBlockingReviewerPrompt(unit, plan, { draftDirLabel: options.draftDirLabel }), {
           outputSchema: blockingReviewResultJsonSchema,
+          signal: options.signal,
         }),
+      options,
     );
     const parsed = normalizeBlockingReviewResultFromRaw([plan], turn.finalResponse);
     return {
@@ -545,8 +595,9 @@ export class CodexTaskBuilderClient {
 
   async repairTask(args: {
     unit: GenerationUnit;
-    workspace: FamilyWorkspace;
+    workspace: WorkspaceRootProvider;
     plan: DerivedTaskPlan;
+    draftDirLabel?: string;
     blockingIssues: string[];
     staticIssues: string[];
     runtimeIssues: string[];
@@ -572,6 +623,7 @@ export class CodexTaskBuilderClient {
     noSkillRewardPath?: string;
     noSkillTrajectoryPath?: string;
     threadId?: string | null;
+    signal?: AbortSignal;
   }): Promise<StructuredRunResult<RepairTurnResult>> {
     const { result: turn, threadId } = await this.runThreadWithRetries(
       "repair-task",
@@ -581,6 +633,7 @@ export class CodexTaskBuilderClient {
           buildRepairPrompt({
             unit: args.unit,
             plan: args.plan,
+            draftDirLabel: args.draftDirLabel,
             blockingIssues: args.blockingIssues,
             staticIssues: args.staticIssues,
             runtimeIssues: args.runtimeIssues,
@@ -608,8 +661,12 @@ export class CodexTaskBuilderClient {
           }),
           {
             outputSchema: repairTurnResultJsonSchema,
+            signal: args.signal,
           },
         ),
+      {
+        signal: args.signal,
+      },
     );
     const parsed = normalizeRepairTurnResultFromRaw(turn.finalResponse);
     return {

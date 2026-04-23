@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { GenerationUnit, SkillInfo } from "./discovery.js";
 import type { DerivedTaskPlan } from "./schema.js";
-import { buildTaskBuilderBrief, relativeDraftPath } from "./prompts.js";
+import { buildTaskAttemptBrief } from "./prompts.js";
 import {
   buildRawRoot,
   copyDir,
@@ -23,7 +23,25 @@ export type FamilyWorkspace = {
   rootDir: string;
   templateSourceDir: string;
   inputSkillsDir: string;
-  draftsDir: string;
+  artifactsDir: string;
+};
+
+export type TaskAttemptWorkspace = {
+  runId: string;
+  templateId: string;
+  templateRelativePath: string;
+  skillMode: "all" | "per-skill";
+  inputSkills: SkillInfo[];
+  targetSkill: SkillInfo | null;
+  scopeSlug: string;
+  derivedTaskId: string;
+  taskRole: "similar" | "transfer";
+  roleOrdinal: number;
+  attemptIndex: number;
+  rootDir: string;
+  templateSourceDir: string;
+  inputSkillsDir: string;
+  draftDir: string;
   artifactsDir: string;
   briefPath: string;
 };
@@ -48,16 +66,12 @@ export async function createFamilyWorkspace(
   const rootDir = path.join(rawRoot, runId, template.templateId, unit.scopeSlug);
   const templateSourceDir = path.join(rootDir, "template_source");
   const inputSkillsDir = path.join(rootDir, "input_skills");
-  const draftsDir = path.join(rootDir, "drafts");
   const artifactsDir = path.join(rootDir, "artifacts");
-  const briefPath = path.join(rootDir, "TASK_BUILDER_BRIEF.md");
 
   await ensureDir(rootDir);
-  await ensureDir(draftsDir);
   await ensureDir(artifactsDir);
   await copyDir(template.sourceDir, templateSourceDir);
   await copyInputSkills(unit.inputSkills, inputSkillsDir);
-  await writeText(briefPath, `${buildTaskBuilderBrief(unit)}\n`);
   await writeJson(path.join(artifactsDir, "generation-unit.json"), unit);
 
   return {
@@ -71,17 +85,71 @@ export async function createFamilyWorkspace(
     rootDir,
     templateSourceDir,
     inputSkillsDir,
-    draftsDir,
+    artifactsDir,
+  };
+}
+
+export async function createTaskAttemptWorkspace(
+  familyWorkspace: FamilyWorkspace,
+  unit: GenerationUnit,
+  plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskRole" | "roleOrdinal">,
+  options: {
+    attemptIndex: number;
+  },
+): Promise<TaskAttemptWorkspace> {
+  const rootDir = path.join(
+    familyWorkspace.rootDir,
+    "task_attempts",
+    plan.derivedTaskId,
+    `attempt-${options.attemptIndex}`,
+  );
+  const templateSourceDir = path.join(rootDir, "template_source");
+  const inputSkillsDir = path.join(rootDir, "input_skills");
+  const draftDir = path.join(rootDir, "draft");
+  const artifactsDir = path.join(rootDir, "artifacts");
+  const briefPath = path.join(rootDir, "TASK_BUILDER_BRIEF.md");
+
+  await ensureDir(rootDir);
+  await ensureDir(draftDir);
+  await ensureDir(artifactsDir);
+  await copyDir(familyWorkspace.templateSourceDir, templateSourceDir);
+  await copyDir(familyWorkspace.inputSkillsDir, inputSkillsDir);
+  await writeText(
+    briefPath,
+    `${buildTaskAttemptBrief(unit, plan, {
+      attemptIndex: options.attemptIndex,
+      draftDirLabel: "draft/",
+      artifactsDirLabel: "artifacts/",
+    })}\n`,
+  );
+  await writeJson(path.join(artifactsDir, "generation-unit.json"), unit);
+
+  return {
+    runId: familyWorkspace.runId,
+    templateId: familyWorkspace.templateId,
+    templateRelativePath: familyWorkspace.templateRelativePath,
+    skillMode: familyWorkspace.skillMode,
+    inputSkills: familyWorkspace.inputSkills,
+    targetSkill: familyWorkspace.targetSkill,
+    scopeSlug: familyWorkspace.scopeSlug,
+    derivedTaskId: plan.derivedTaskId,
+    taskRole: plan.taskRole,
+    roleOrdinal: plan.roleOrdinal,
+    attemptIndex: options.attemptIndex,
+    rootDir,
+    templateSourceDir,
+    inputSkillsDir,
+    draftDir,
     artifactsDir,
     briefPath,
   };
 }
 
-export async function prepareDraftSkeleton(
-  workspace: FamilyWorkspace,
+export async function prepareAttemptDraftSkeleton(
+  workspace: TaskAttemptWorkspace,
   plan: DerivedTaskPlan,
 ): Promise<string> {
-  const draftDir = path.join(workspace.rootDir, relativeDraftPath(plan.derivedTaskId));
+  const draftDir = workspace.draftDir;
   await ensureDir(path.join(draftDir, "environment"));
   await ensureDir(path.join(draftDir, "solution"));
   await ensureDir(path.join(draftDir, "tests"));

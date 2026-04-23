@@ -58,7 +58,6 @@ PF skill-effect bucket 镜像目录固定为：
 family 层要求：
 
 - `similar` / `transfer` 的数量必须与本轮目标一致
-- 同一 family 内的 `primaryOutputFile` 必须唯一
 - family 规划上应让不同任务在任务场景、输入资产、输出语义和验证方式上拉开差异
 - 当前硬 gate 的去重主要针对 `final` 中已发布的同 family sibling / 历史任务
 
@@ -99,7 +98,6 @@ family 层要求：
 - `difficulty`
 - `category`
 - `tags`
-- `primary_output_file`
 - `source_template_id`
 - `task_role`
 
@@ -108,7 +106,6 @@ family 层要求：
 - `metadata.id` 必须等于当前 `derivedTaskId`
 - `metadata.name` 必须显式包含 `Similar N` 或 `Transfer N`
 - `metadata.name` 与 `metadata.description` 必须使用英文
-- `metadata.primary_output_file` 必须与 `plan.json` 一致
 - `metadata.source_template_id` 必须与当前 `templateId` 一致
 - `metadata.task_role` 必须与任务角色一致
 - `tags` 不能为空
@@ -148,7 +145,7 @@ gpus = 0
   - 模板自带 `environment/skills/` 只作为参考上下文
 - `input_skills/`
   - 才是最终 shipped skills 的唯一来源
-- `drafts/<task>/environment/skills/`
+- `task_attempts/<task>/attempt-<n>/draft/environment/skills/`
   - 是从 `input_skills/` 自动注入的真实 shipped skill payload
 
 因此必须满足：

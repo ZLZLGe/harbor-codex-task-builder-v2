@@ -26,6 +26,18 @@ export type StreamingCommandResult = {
   stderr: string;
 };
 
+export class CommandAbortedError extends Error {
+  stdout: string;
+  stderr: string;
+
+  constructor(message: string, options: { stdout: string; stderr: string }) {
+    super(message);
+    this.name = "AbortError";
+    this.stdout = options.stdout;
+    this.stderr = options.stderr;
+  }
+}
+
 function appendWithLimit(current: string, next: string, maxChars: number): string {
   const joined = current + next;
   return joined.length <= maxChars ? joined : joined.slice(-maxChars);
@@ -118,6 +130,18 @@ export function parseNonNegativeInteger(value: string | undefined, optionLabel: 
   return parsed;
 }
 
+export function parseNonNegativeNumber(value: string | undefined, optionLabel: string, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${optionLabel} 必须是 >= 0 的数字`);
+  }
+  return parsed;
+}
+
 export async function runCommand(
   command: string,
   args: string[],
@@ -165,6 +189,7 @@ export async function runStreamingCommand(
     onHeartbeat?: (() => void | Promise<void>) | null;
     onStdout?: ((chunk: string) => void | Promise<void>) | null;
     onStderr?: ((chunk: string) => void | Promise<void>) | null;
+    signal?: AbortSignal;
   } = {},
 ): Promise<StreamingCommandResult> {
   const outputBufferLimitChars = options.outputBufferLimitChars ?? 200_000;
@@ -181,12 +206,40 @@ export async function runStreamingCommand(
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
     const heartbeatTimer =
       options.heartbeatIntervalMs && options.onHeartbeat
         ? setInterval(() => {
             void Promise.resolve(options.onHeartbeat?.());
           }, options.heartbeatIntervalMs)
         : null;
+
+    const cleanup = () => {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
+      if (options.signal && abortListener) {
+        options.signal.removeEventListener("abort", abortListener);
+      }
+    };
+
+    const settleReject = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const settleResolve = (result: StreamingCommandResult) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
 
     const handleChunk = (channel: "stdout" | "stderr", chunk: Buffer | string) => {
       const text = chunk.toString();
@@ -202,19 +255,36 @@ export async function runStreamingCommand(
       }
     };
 
+    const abortListener = () => {
+      child.kill("SIGTERM");
+      setTimeout(() => {
+        child.kill("SIGKILL");
+      }, 5_000).unref();
+      settleReject(
+        options.signal?.reason instanceof Error
+          ? options.signal.reason
+          : new CommandAbortedError("命令执行已中断", {
+              stdout,
+              stderr,
+            }),
+      );
+    };
+
+    if (options.signal?.aborted) {
+      abortListener();
+      return;
+    }
+
     child.stdout.on("data", (chunk: Buffer | string) => handleChunk("stdout", chunk));
     child.stderr.on("data", (chunk: Buffer | string) => handleChunk("stderr", chunk));
+    if (options.signal) {
+      options.signal.addEventListener("abort", abortListener, { once: true });
+    }
     child.on("error", (error) => {
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-      }
-      reject(error);
+      settleReject(error);
     });
     child.on("close", (code) => {
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-      }
-      resolve({
+      settleResolve({
         code: code ?? 1,
         stdout,
         stderr,

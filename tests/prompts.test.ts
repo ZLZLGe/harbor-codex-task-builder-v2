@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import {
   buildBlockingReviewerPrompt,
-  buildFamilyPlannerPrompt,
   buildRepairPrompt,
-  buildTaskBuilderBrief,
+  buildSingleTaskPlannerPrompt,
+  buildTaskAttemptBrief,
   buildTaskWriterPrompt,
 } from "../src/prompts.js";
-import type { DerivedTaskPlan, FamilyPlan } from "../src/schema.js";
+import type { DerivedTaskPlan } from "../src/schema.js";
 import { buildGenerationUnits, type GenerationUnit, type SkillInfo, type TaskTemplate } from "../src/discovery.js";
 
 const debugSkill: SkillInfo = {
@@ -84,7 +84,6 @@ const plan: DerivedTaskPlan = {
   roleOrdinal: 1,
   title: "Debugging Similar 1",
   goal: "Repair the failing dashboard service.",
-  primaryOutputFile: "incident-summary.json",
   difficulty: "hard",
   category: "debugging",
   skillBenefitRationale: "Requires the injected debugging workflow.",
@@ -94,65 +93,18 @@ const plan: DerivedTaskPlan = {
   targetSkillName: debugSkill.name,
 };
 
-const familyPlan: FamilyPlan = {
-  templateId: template.templateId,
-  skillMode: "per-skill",
-  targetSkillDirName: debugSkill.dirName,
-  targetSkillName: debugSkill.name,
-  familyTheme: "Debugging production regressions",
-  similarTasks: [
-    {
-      title: plan.title,
-      goal: plan.goal,
-      primaryOutputFile: plan.primaryOutputFile,
-      difficulty: plan.difficulty,
-      category: plan.category,
-      skillBenefitRationale: plan.skillBenefitRationale,
-    },
-    {
-      title: "Debugging Similar 2",
-      goal: "Repair a second failing dashboard scenario.",
-      primaryOutputFile: "dashboard-summary.json",
-      difficulty: "hard",
-      category: "debugging",
-      skillBenefitRationale: "Uses the same debugging workflow in a nearby scenario.",
-    },
-  ],
-  transferTasks: [
-    {
-      title: "CLI Transfer 1",
-      goal: "Repair a CLI startup failure.",
-      primaryOutputFile: "cli-summary.json",
-      difficulty: "hard",
-      category: "debugging",
-      skillBenefitRationale: "Moves the debugging workflow into CLI startup traces.",
-    },
-    {
-      title: "Worker Transfer 2",
-      goal: "Repair a worker timeout failure.",
-      primaryOutputFile: "worker-summary.json",
-      difficulty: "hard",
-      category: "debugging",
-      skillBenefitRationale: "Moves the debugging workflow into async worker diagnostics.",
-    },
-    {
-      title: "Queue Transfer 3",
-      goal: "Repair a queue processing regression.",
-      primaryOutputFile: "queue-summary.json",
-      difficulty: "hard",
-      category: "debugging",
-      skillBenefitRationale: "Moves the debugging workflow into queue failure triage.",
-    },
-  ],
-};
-
-const brief = buildTaskBuilderBrief(unit);
-const plannerPrompt = buildFamilyPlannerPrompt(unit);
+const brief = buildTaskAttemptBrief(unit, plan, {
+  attemptIndex: 2,
+});
+const singleTaskPlannerPrompt = buildSingleTaskPlannerPrompt(unit, {
+  derivedTaskId: plan.derivedTaskId,
+  taskRole: plan.taskRole,
+  roleOrdinal: plan.roleOrdinal,
+});
 const writerPrompt = buildTaskWriterPrompt(unit, plan);
-const blockingReviewerPrompt = buildBlockingReviewerPrompt(unit, familyPlan, plan);
-const historyPlannerPrompt = buildFamilyPlannerPrompt(historyAwareUnit);
+const blockingReviewerPrompt = buildBlockingReviewerPrompt(unit, plan);
 const historyWriterPrompt = buildTaskWriterPrompt(historyAwareUnit, plan);
-const historyBlockingReviewerPrompt = buildBlockingReviewerPrompt(historyAwareUnit, familyPlan, plan);
+const historyBlockingReviewerPrompt = buildBlockingReviewerPrompt(historyAwareUnit, plan);
 const repairPrompt = buildRepairPrompt({
   unit,
   plan,
@@ -167,29 +119,56 @@ const allModeUnit = buildGenerationUnits(template, [debugSkill, sessionSkill], {
   similarCount: 1,
   transferCount: 1,
 })[0];
-const allModeBrief = buildTaskBuilderBrief(allModeUnit!);
-const allModePlannerPrompt = buildFamilyPlannerPrompt(allModeUnit!);
+const allModeBrief = buildTaskAttemptBrief(
+  allModeUnit!,
+  {
+    derivedTaskId: "similar1",
+    taskRole: "similar",
+    roleOrdinal: 1,
+  },
+  {
+    attemptIndex: 1,
+  },
+);
 
 assert.equal(allModeUnit?.scopeSlug, "all-skills");
 
+assert.match(brief, /当前 task: similar1 \(Similar 1\)/);
+assert.match(brief, /当前 attempt: attempt-2/);
+assert.match(brief, /当前唯一允许修改的任务目录: draft\//);
+assert.match(brief, /当前证据目录: artifacts\//);
+assert.match(brief, /历史 attempt 和其他 task 的未发布草稿都不属于当前上下文/);
 assert.match(brief, /模板目录: template_source\//);
 assert.match(brief, /输入 skills 目录: input_skills\//);
-assert.match(brief, /drafts\/<task_name>\/environment\/skills\/ 由系统从 input_skills\/ 预注入/);
+assert.match(brief, /draft\/environment\/skills\/ 由系统从 input_skills\/ 预注入/);
 assert.match(brief, /这些 injected skills 是只读 payload/);
 assert.match(brief, /template_source\/environment\/skills\/ 里的内容只作为模板上下文参考/);
 assert.match(brief, /最终 shipped skills 只由 input_skills\/ 决定/);
+assert.match(brief, /Harbor 任务格式摘要/);
+assert.match(brief, /instruction\.md：用户可见的任务说明与约束/);
+assert.match(brief, /solution\/solve\.sh：用于证明任务可行性的 oracle 解法/);
+assert.match(brief, /tests\/test\.sh：verifier 入口/);
+assert.match(brief, /Harbor 会先在容器化环境中运行 agent，再执行 \/tests\/test\.sh 来判定 reward/);
+assert.match(brief, /\/logs\/、\/oracle\/、\/tests\//);
 assert.doesNotMatch(brief, /builder_refs\/harbor/);
-assert.match(brief, /只需要检查 final-root 下已经发布的 \*__with_skill sibling tasks/);
+assert.match(brief, /正式历史任务只看 final-root 下已发布的 \*__with_skill 任务/);
+assert.doesNotMatch(brief, /family 增量/);
+assert.doesNotMatch(brief, /familyTheme/);
+assert.doesNotMatch(brief, /similarTasks/);
+assert.doesNotMatch(brief, /transferTasks/);
+assert.doesNotMatch(brief, /drafts\//);
 
-assert.match(plannerPrompt, /完整检查 template_source\/ 和 input_skills\//);
-assert.doesNotMatch(plannerPrompt, /builder_refs\/harbor/);
-assert.match(plannerPrompt, /templateId: tools__debugging/);
-assert.match(plannerPrompt, /完整检查当前目标输入 shipped skill 的目录/);
-assert.match(plannerPrompt, /input_skills\/ 才是最终 shipped skill 来源/);
-assert.match(plannerPrompt, /已发布 \*__with_skill 任务/);
-assert.match(plannerPrompt, /不要把 \*__no_skill 对照副本视为正式历史任务/);
-assert.match(historyPlannerPrompt, /已发布 Harbor family 目录/);
-assert.match(historyPlannerPrompt, /\*__with_skill/);
+assert.match(singleTaskPlannerPrompt, /当前只规划一个任务 similar1/);
+assert.match(singleTaskPlannerPrompt, /你只需要为当前槽位返回一个单题 blueprint/);
+assert.match(singleTaskPlannerPrompt, /只返回 schema 要求的 5 个字段：title、goal、difficulty、category、skillBenefitRationale/);
+assert.match(singleTaskPlannerPrompt, /derivedTaskId、taskRole、roleOrdinal、templateId、skillMode、targetSkillDirName、targetSkillName 由程序补齐/);
+assert.match(singleTaskPlannerPrompt, /display name: Similar 1/);
+assert.match(singleTaskPlannerPrompt, /历史 attempt 和其他未发布草稿都不是正式去重基准/);
+assert.doesNotMatch(singleTaskPlannerPrompt, /family planner/);
+assert.doesNotMatch(singleTaskPlannerPrompt, /familyTheme/);
+assert.doesNotMatch(singleTaskPlannerPrompt, /similarTasks/);
+assert.doesNotMatch(singleTaskPlannerPrompt, /transferTasks/);
+assert.doesNotMatch(singleTaskPlannerPrompt, /primaryOutputFile/);
 
 assert.match(writerPrompt, /template_source\/、input_skills\/、当前 task 的 plan\.json blueprint/);
 assert.doesNotMatch(writerPrompt, /builder_refs\/harbor/);
@@ -199,9 +178,12 @@ assert.match(writerPrompt, /这些 injected skills 是只读 payload/);
 assert.match(writerPrompt, /不是当前任务必须参考的去重对象/);
 assert.match(writerPrompt, /只以 final-root 下已经发布的 \*__with_skill 同 family 任务为准/);
 assert.match(writerPrompt, /不要把 \*__no_skill 对照副本当成历史任务/);
+assert.match(writerPrompt, /当前只允许修改 draft\/ 内的文件/);
 assert.match(writerPrompt, /不得把 skills 复制到普通运行时路径/);
 assert.match(writerPrompt, /唯一允许语句是 COPY skills \/root\/\.codex\/skills/);
 assert.match(writerPrompt, /不要再添加任何把 skills\/ 或 \/root\/\.codex\/skills 复制、移动、同步、软链接到其他目录/);
+assert.doesNotMatch(writerPrompt, /primaryOutputFile/);
+assert.doesNotMatch(writerPrompt, /primary_output_file/);
 assert.match(historyWriterPrompt, /已发布 Harbor family 目录/);
 assert.match(historyWriterPrompt, /similar1__with_skill/);
 
@@ -210,18 +192,24 @@ assert.match(blockingReviewerPrompt, /writer 不应改写 injected skill payload
 assert.match(blockingReviewerPrompt, /taskResults 中只返回当前这个任务/);
 assert.match(blockingReviewerPrompt, /已发布 \*__with_skill sibling \/ 历史任务/);
 assert.doesNotMatch(blockingReviewerPrompt, /builder_refs\/harbor/);
+assert.match(blockingReviewerPrompt, /当前 task:\s+- similar1 \(Similar 1\) -> draft\//);
+assert.match(blockingReviewerPrompt, /当前只审这个 task 的当前 attempt/);
+assert.doesNotMatch(blockingReviewerPrompt, /当前 family 规划:/);
 assert.match(historyBlockingReviewerPrompt, /已发布 Harbor family 目录/);
 assert.match(historyBlockingReviewerPrompt, /\*__with_skill sibling \/ 历史任务/);
 
 assert.match(repairPrompt, /不要修改 template_source\/、input_skills\/、artifacts\//);
 assert.doesNotMatch(repairPrompt, /builder_refs\//);
 assert.match(repairPrompt, /不要修改 environment\/skills\/ 下 injected skill 的内容/);
+assert.match(repairPrompt, /family workspace 根目录、历史 attempt、Harbor 仓库代码/);
+assert.match(repairPrompt, /你还可以读取这些本 attempt 的运行证据/);
 assert.match(repairPrompt, /metadata\.source_template_id/);
 assert.match(repairPrompt, /blocking reviewer:/);
 assert.match(repairPrompt, /唯一允许语句是 COPY skills \/root\/\.codex\/skills/);
 assert.match(repairPrompt, /with_skill_pass__no_skill_invalid_fail/);
 assert.match(repairPrompt, /已发布 \*__with_skill sibling \/ 历史任务过近/);
 assert.doesNotMatch(repairPrompt, /family:/);
+assert.doesNotMatch(repairPrompt, /primaryOutputFile/);
+assert.doesNotMatch(repairPrompt, /primary_output_file/);
 
-assert.match(allModeBrief, /当前 family 需要保留全部输入 skills 的关键能力点和实际解题收益/);
-assert.match(allModePlannerPrompt, /完整检查当前全部输入 shipped skills 的目录/);
+assert.match(allModeBrief, /当前 task 必须保留全部输入 skills 的关键能力点和实际解题收益/);
