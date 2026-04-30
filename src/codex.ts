@@ -392,7 +392,7 @@ export class CodexTaskBuilderClient {
       approvalPolicy: "never",
       skipGitRepoCheck: true,
       networkAccessEnabled,
-      modelReasoningEffort: "medium",
+      modelReasoningEffort: "high",
     };
 
     this.codexRunRetries = options.codexRunRetries ?? 0;

@@ -71,12 +71,14 @@
 
 ```text
 <output-root>/final/<template-id>/<scope>/<task-name>__with_skill
+# 默认 gate 开启且达到 PF 时，才会额外发布 __no_skill
 <output-root>/final/<template-id>/<scope>/<task-name>__no_skill
 ```
 
 PF bucket 镜像目录结构固定为：
 
 ```text
+# 只有默认 gate 开启且达到 PF 时才会写入 bucket 镜像
 <output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
 <output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
 ```
@@ -322,7 +324,12 @@ task_attempts/<task-id>/attempt-<n>/
 对于当前 task：
 
 1. 先创建当前 task 的 `attempt-<n>/`
-2. 在该 attempt 内调用单题 planner，只返回当前槽位的 blueprint 字段
+2. 在该 attempt 内调用单题 planner，只返回当前槽位的 blueprint 字段：
+   - `title`
+   - `goal`
+   - `difficulty`
+   - `category`
+   - `skillBenefitRationale`
 3. 预先把 `input_skills/` 复制到 `draft/environment/skills/`
 4. 写入 `draft/plan.json`
 5. 再调用 writer 生成：
@@ -342,7 +349,7 @@ task_attempts/<task-id>/attempt-<n>/
 - writer 做 sibling / 历史去重时，只参考 `final-root` 下已经发布的同 family 任务
 - workspace 中其他尚未发布的 sibling drafts，以及该 task 的旧 attempt，都不再作为强制去重基准
 
-### 第 8 步：task blocking reviewer
+### 第 7 步：task blocking reviewer
 
 当前版本已经没有独立的 family reviewer。
 
@@ -363,7 +370,7 @@ task blocking reviewer 的输出只有：
 
 程序不会盲信 reviewer，会做结构归一化和结果校验。
 
-### 第 9 步：static validate
+### 第 8 步：static validate
 
 当前 task 的 draft 会进入静态校验。
 
@@ -387,7 +394,7 @@ task blocking reviewer 的输出只有：
 
 只有 reviewer 和 static 都通过的任务，才会进入 runtime validate。
 
-### 第 10 步：Harbor Oracle runtime validate
+### 第 9 步：Harbor Oracle runtime validate
 
 每个通过前置检查的任务都会跑一遍 Harbor Oracle：
 
@@ -413,7 +420,7 @@ runtime 通过标准：
 - reward `>= 1.0`
 - `harbor run` 退出码为 `0`
 
-### 第 11 步：skill-effect gate
+### 第 10 步：skill-effect gate
 
 如果没有显式 `--skip-skill-effect-gate`，每个通过 Oracle runtime 的任务都会继续做真实对照：
 
@@ -451,7 +458,7 @@ runtime 通过标准：
 
 只有 `with_skill_pass__no_skill_fail` 视为接受；其余所有 bucket 都会触发 repair。
 
-### 第 12 步：repair
+### 第 11 步：repair
 
 只要命中下面任一问题，就可能触发 repair：
 
@@ -490,7 +497,7 @@ task_attempts/<task-id>/attempt-<n>/draft/
 
 则该 attempt 会结束；只要 `--max-task-restarts` 还有余额，程序就会重新创建新的 `attempt-<n+1>/` 从头 fresh restart。
 
-### 第 13 步：publish / 保留 raw
+### 第 12 步：publish / 保留 raw
 
 当前 task 在 blocking reviewer、static validate、Harbor Oracle runtime 都通过之后，发布分两条路径：
 
@@ -552,8 +559,8 @@ PF bucket 会额外落盘到：
 workspace `artifacts/` 中常见产物包括：
 
 - `generation-unit.json`
-- `family-plan.json`
-- `family-plan.raw.json`
+- `<task>.planner.json`
+- `<task>.planner.raw.json`
 - `<task>.writer.json`
 - `<task>.writer.raw.json`
 - `<task>.review.round-<n>.json`

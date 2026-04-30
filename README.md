@@ -4,6 +4,15 @@
 
 它不再从 `source task` 扫描 family，也不再保留 `batch` / `review` 这两个旧入口。当前主链路只关注一件事：给定一个任务模板目录和一组输入 skill，自动规划、写作、单题 blocking 审查、runtime 校验、skill-effect 对照并发布 Harbor 任务。
 
+文档分工：
+
+- `README.md`
+  - 只讲入口用法和当前高层行为
+- `TASK_BUILDER_FLOW.md`
+  - 详细解释当前状态机、attempt workspace、repair / publish 流程
+- `FINAL_TASK_REQUIREMENTS.md`
+  - 汇总最终生成任务必须满足的结构与质量合同
+
 ## 输入模型
 
 ### 模板
@@ -105,7 +114,11 @@ npm run generate-family -- \
   - 可选，按 unit 限制本次实际执行数量
   - 程序会先发现 units、读取 published state、筛出 executable units，再最多执行前 N 个；`0` 或未传表示不额外限制
 - `--skip-skill-effect-gate`
+  - 可选，关闭真实 with-skill / no-skill 对照
+  - 关闭后，任务只要通过 reviewer / static / Oracle runtime，就会直接发布 `__with_skill`
+  - 这条路径不会生成 `__no_skill`，也不会写入 `_skill_effect_buckets/`
 - `--skill-effect-model`
+  - 可选，指定 skill-effect 阶段 Harbor Codex trial 使用的模型
 
 ## 输出布局
 
@@ -122,8 +135,10 @@ npm run generate-family -- \
       task_attempts/<task-id>/attempt-<n>/...
   final/
     <template-id>/<scope>/<task-name>__with_skill
+    # 默认 gate 开启且达到 PF 时，才会额外发布 __no_skill
     <template-id>/<scope>/<task-name>__no_skill
     _skill_effect_buckets/
+      # 只有默认 gate 开启且达到 PF 时才会写入 bucket 镜像
       with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
       with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
 ```
@@ -144,6 +159,7 @@ final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__
 - `final/` 只保留真正接受的 PF 任务。
 - `__with_skill` 是正式发布体，也是历史去重、重复运行复用、pending slot 判断唯一参考。
 - `__no_skill` 是对照副本，会随 PF 一起发布，但不会参与历史任务扫描。
+- 显式 `--skip-skill-effect-gate` 时，只会发布 `__with_skill`，不会生成 `__no_skill` 或 bucket 镜像。
 - 非 PF 任务不再 materialize 到单独目录，只保留在 `raw/`、`manifest.jsonl` 和 `<run-id>.json` 中。
 - 旧布局 `final/<template-id>/<scope>/<task-name>` 不兼容；当前代码只识别 `*__with_skill`。上线前需要手动清理或迁移旧 `final/`。
 
@@ -172,6 +188,7 @@ final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__
 
 - 改为 task 级单题 planner + 串行执行
   - 固定顺序是 `similar1..N` 先于 `transfer1..N`
+  - planner 当前只返回 `title / goal / difficulty / category / skillBenefitRationale`
   - 每个 task 单独经历 `single-task planner -> write -> blocking review -> static validate -> runtime -> skill-effect -> repair`
   - 每次 fresh restart 都会切到新的 `task_attempts/<task>/attempt-<n>/` 工作区
   - `skill-effect` 内部会在变体准备完成后默认并行运行 `with_skill` / `no_skill`
@@ -228,3 +245,8 @@ skill-effect gate 现在进一步区分：
 - `review`
 
 如果传入旧参数，CLI 会直接报错。
+
+更细的状态机、产物和发布路径说明，请直接看：
+
+- `TASK_BUILDER_FLOW.md`
+- `FINAL_TASK_REQUIREMENTS.md`

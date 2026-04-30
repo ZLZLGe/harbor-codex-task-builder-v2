@@ -25,7 +25,7 @@
 
 ## 2. 目录与命名要求
 
-最终发布目录结构固定为：
+默认开启 skill-effect gate 且任务达到 `with_skill_pass__no_skill_fail` 时，发布目录结构固定为：
 
 ```text
 <output-root>/final/<template-id>/<scope>/<task-name>__with_skill
@@ -37,6 +37,12 @@ PF skill-effect bucket 镜像目录固定为：
 ```text
 <output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
 <output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
+```
+
+显式关闭 skill-effect gate（`--skip-skill-effect-gate`）时，发布目录固定为：
+
+```text
+<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
 ```
 
 其中：
@@ -77,6 +83,20 @@ family 层要求：
 补充要求：
 
 - `plan.json` 当前实现仍会保留，不能删除或改名
+- `plan.json` 必须是可解析 JSON，且至少应包含：
+  - `derivedTaskId`
+  - `taskRole`
+  - `roleOrdinal`
+  - `title`
+  - `goal`
+  - `difficulty`
+  - `category`
+  - `skillBenefitRationale`
+  - `templateId`
+  - `skillMode`
+  - `targetSkillDirName`
+  - `targetSkillName`
+- `plan.json.derivedTaskId` 必须等于当前任务目录名
 - 发布时只允许复制 Harbor 必需文件，不发布 builder 内部额外产物
 - 发布 allowlist 固定为：
   - `task.toml`
@@ -153,6 +173,7 @@ gpus = 0
 - 不得把模板自带 `environment/skills/` 误当成最终 shipped skills
 - 任务只能依赖当前 scope 下可见的 input skills
 - 不得假设其他未提供 skills 存在
+- `instruction.md`、`solution/solve.sh`、`tests/test.sh`、`tests/test_outputs.py` 不得直接导入或依赖 skill 安装路径
 - `solution/solve.sh` 与 `tests/**` 不能把 skill 当运行时依赖
 - `environment/skills/**` 的内容必须与输入 skill 完全一致，不允许 writer / repair 修改 injected skill payload
 

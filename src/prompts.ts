@@ -151,12 +151,18 @@ function renderSkillEffectDesignRules(unit: GenerationUnit): string {
 
 function renderEnvironmentResourceRules(): string {
   return dedent(`
-    task.toml 环境契约:
+    task.toml 环境与超时契约:
     - task.toml 必须包含 [environment]。
     - [environment].cpus 必须为 2。
     - [environment].memory_mb 必须为 2048。
     - [environment].storage_mb 必须为 5120。
     - [environment].gpus 必须为 0。
+    - [environment].build_timeout_sec 必须显式写出，值必须是合理的秒数，足以完成当前 environment/Dockerfile build。
+    - task.toml 必须包含 [agent]。
+    - [agent].timeout_sec 必须显式写出，值必须是合理的秒数，足以完成当前任务，不要省略。
+    - task.toml 必须包含 [verifier]。
+    - [verifier].timeout_sec 必须显式写出，值必须是合理的秒数，足以运行 tests/test.sh 和 tests/test_outputs.py。
+    - timeout 秒数可以参考 template_source/task.toml，但不要机械照抄；应根据当前任务复杂度、依赖安装、测试耗时和 agent 解题负担合理设置。
   `);
 }
 
@@ -369,6 +375,9 @@ export function buildTaskWriterPrompt(
       - memory_mb = 2048
       - storage_mb = 5120
       - gpus = 0
+    - task.toml 还必须显式包含 [environment].build_timeout_sec、[agent].timeout_sec、[verifier].timeout_sec。
+    - 这些 timeout 字段必须是数值秒数；不要省略，不要依赖 Harbor 默认值。
+    - timeout 秒数由你根据 template_source/task.toml 和当前任务复杂度自行设置。
     - 必须保留 plan.json，不要删除或改名；如需更新，只能与当前 blueprint 保持一致。
     ${renderDockerfileRules()}
     - 不要把当前任务实现成比 blueprint 更轻的版本；尤其不要通过教程式 instruction、暴露关键步骤、放置一眼可见答案或单命令捷径，把它稀释成 easy/普通 medium 小题。
@@ -430,6 +439,7 @@ export function buildBlockingReviewerPrompt(
       - reward 是否写到 /logs/verifier/reward.txt 或 /logs/verifier/reward.json
       - 是否稳定写出 reward，而不是裸跑测试后直接结束
       - 是否存在 set -e/pipefail 导致写 reward 前提前退出的路径
+      - task.toml 是否显式包含 [environment].build_timeout_sec、[agent].timeout_sec、[verifier].timeout_sec；如果缺失任一 timeout 字段，直接判定为 blocking 问题
       - environment/ 如果直接提供了任务完整标准答案，直接判错
       - solution/solve.sh 如果不是根据输入资产进行解题，例如直接硬编码答案来强行通过任务，直接判错
       - tests/test_outputs.py 是否只检查 instruction.md 中已说明、或可直接推出的输出契约，并面向结果语义而不是未承诺的实现细节；否则视为 hidden requirement
@@ -548,6 +558,7 @@ export function buildRepairPrompt(args: {
     - 必须保留 plan.json，不要删除。
     - instruction.md、task.toml 的 metadata.name、metadata.description 必须保持英文，不要写中文任务描述。
     - 不要改变 task.toml 的 metadata.id、metadata.source_template_id、metadata.task_role 所代表的任务身份；如当前这些字段缺失或错误，可以把它们修正到与 plan.json 一致。
+    - 如果 task.toml 缺少 [environment].build_timeout_sec、[agent].timeout_sec 或 [verifier].timeout_sec，必须补齐；秒数根据 template_source/task.toml、当前任务复杂度和测试耗时合理设置，不要依赖 Harbor 默认值。
     - 如果 blocking reviewer 指出当前 task 与已发布 *__with_skill sibling / 历史任务过近，优先通过修改 instruction、输入资产、输出契约或验收对象把它们拉开差异；不要改 task id 或 role。
     - 不要修改 environment/skills/ 下 injected skill payload；如果需要调整 skill 使用方式，应通过题目本身、输入资产、tests 修正，而不是改 skill 内容。
     - 如果 solution/solve.sh 或 tests/** 直接调用 skill 模块，必须去耦：把最小必需逻辑搬到任务自身代码里；最终参考解与 verifier 在有 skill / 无 skill 两种评测设置都要能运行。
