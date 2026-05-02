@@ -46,10 +46,15 @@ export const skillModeSchema = z.enum(["all", "per-skill"]);
 
 export const plannedTaskSchema = z.object({
   title: z.string().min(1),
-  goal: z.string().min(1),
+  realWorldContext: z.string().min(1),
+  referenceData: z.string().min(1),
+  taskGoal: z.string().min(1),
+  inputAssets: z.string().min(1),
+  requiredOutputs: z.string().min(1),
+  verifierFocus: z.string().min(1),
+  skillBenefitRationale: z.string().min(1),
   difficulty: z.string().min(1),
   category: z.string().min(1),
-  skillBenefitRationale: z.string().min(1),
 });
 
 export const singleTaskPlanSchema = plannedTaskSchema;
@@ -59,10 +64,15 @@ export const derivedTaskPlanSchema = z.object({
   taskRole: taskRoleSchema,
   roleOrdinal: z.number().int().positive(),
   title: z.string().min(1),
-  goal: z.string().min(1),
+  realWorldContext: z.string().min(1),
+  referenceData: z.string().min(1),
+  taskGoal: z.string().min(1),
+  inputAssets: z.string().min(1),
+  requiredOutputs: z.string().min(1),
+  verifierFocus: z.string().min(1),
+  skillBenefitRationale: z.string().min(1),
   difficulty: z.string().min(1),
   category: z.string().min(1),
-  skillBenefitRationale: z.string().min(1),
   templateId: z.string().min(1),
   skillMode: skillModeSchema,
   targetSkillDirName: z.string(),
@@ -103,13 +113,29 @@ export type RepairTurnResult = z.infer<typeof repairTurnResultSchema>;
 const plannedTaskJsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["title", "goal", "difficulty", "category", "skillBenefitRationale"],
+  required: [
+    "title",
+    "realWorldContext",
+    "referenceData",
+    "taskGoal",
+    "inputAssets",
+    "requiredOutputs",
+    "verifierFocus",
+    "skillBenefitRationale",
+    "difficulty",
+    "category",
+  ],
   properties: {
     title: { type: "string" },
-    goal: { type: "string" },
+    realWorldContext: { type: "string" },
+    referenceData: { type: "string" },
+    taskGoal: { type: "string" },
+    inputAssets: { type: "string" },
+    requiredOutputs: { type: "string" },
+    verifierFocus: { type: "string" },
+    skillBenefitRationale: { type: "string" },
     difficulty: { type: "string" },
     category: { type: "string" },
-    skillBenefitRationale: { type: "string" },
   },
 } as const;
 

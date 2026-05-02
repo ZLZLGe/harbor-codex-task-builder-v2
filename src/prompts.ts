@@ -171,6 +171,9 @@ function renderDockerfileRules(): string {
     Dockerfile 契约:
     - environment/Dockerfile 必须显式声明 WORKDIR。
     - 如果 WORKDIR 不是 /root，solution/solve.sh、tests/test.sh、tests/test_outputs.py 与 Dockerfile 的路径契约仍必须保持一致。
+    - agent 解题需要读取、编辑、分析的非 skill 输入资产，应优先 COPY 到 WORKDIR 或其子目录；不要把题目输入散落在默认工作目录外。
+    - 纯可执行工具可以放在 /usr/local/bin；后台服务内部实现可以放在其他系统路径，但如果题面要求 agent 直接阅读或修改，应放进 WORKDIR。
+    - 这样可以保证 Codex 进入默认工作目录时自然发现任务资产，减少“资产存在但 agent 没看到”的失败。
     - environment/Dockerfile 不得把 skills 复制到普通运行时路径，如 /root/environment/skills、/app/skills、/workspace/skills。
     - environment/Dockerfile 中与 skill 安装相关的唯一允许语句是 COPY skills /root/.codex/skills。
     - 不要再添加任何把 skills/ 或 /root/.codex/skills 复制、移动、同步、软链接到其他目录的 COPY、RUN cp、ln -s、rsync 或等价逻辑。
@@ -284,9 +287,26 @@ export function buildSingleTaskPlannerPrompt(
 
     规划要求:
     - 规划前必须完整检查当前相关输入 shipped skills 的目录，至少阅读各自的 SKILL.md 以及其中直接引用的脚本、模板和资源文件；不要只根据 skill 名字猜用途。
+    - 规划前必须优先使用 web search 查找真实世界资料、官方文档、公开标准、权威数据库、真实项目文档或公开业务资料。
+    - 不要凭空编造关键背景、数据、规则或标准；如果某个关键设定来自真实资料，必须在 referenceData 中记录来源。
+    - 应尽可能的规划出一个没有skill连gpt5.4都无法做出来的任务，且失败的细节必须是偏行动级别的失败、一些格式问题可以放宽松，但是有了skill以后，gpt5.4就可以稳定做出来。
     - 必须基于 shipped skill 目录内容提炼关键能力点，并明确说明没有这些能力点时通用 agent 会卡在哪里。
-    - 输出的title、goal、difficulty、category、skillBenefitRationale 必须用中文。
-    - 当前只规划一个任务 ${slotName}；只返回 schema 要求的 5 个字段：title、goal、difficulty、category、skillBenefitRationale。
+    - 输出的 title、realWorldContext、taskGoal、inputAssets、requiredOutputs、verifierFocus、skillBenefitRationale、difficulty、category 必须用中文；referenceData 可以保留来源标题原文。
+    - 当前只规划一个任务 ${slotName}；只返回 schema 要求的 10 个字段：title、realWorldContext、referenceData、taskGoal、inputAssets、requiredOutputs、verifierFocus、skillBenefitRationale、difficulty、category。
+    - title: 短标题。
+    - realWorldContext: 基于真实资料的现实业务/工作背景。
+    - referenceData: planner web search 得到的实际参考来源列表，使用纯文本格式，例如：
+      Reference data:
+
+      - Source title: https://example.com/page
+      - Source title: https://example.com/another-page
+    - taskGoal: agent 最终要完成的任务目标。
+    - inputAssets: writer 应该构造哪些输入资产。
+    - requiredOutputs: agent 必须产出的文件、字段、报告或状态变化。
+    - verifierFocus: verifier 应重点检查的行为、语义和输出契约。
+    - skillBenefitRationale: 1.解释目标 skill 为什么与任务关键能力相关。2.解释为什么agent在执行任务的时候为什么有skill会比无skill更容易通过任务
+    - difficulty: 难度。
+    - category: 类别。
     - derivedTaskId、taskRole、roleOrdinal、templateId、skillMode、targetSkillDirName、targetSkillName 由程序补齐，不属于 planner 输出。
     - 当前工作上下文只代表这个 task 的当前 attempt；历史 attempt 和其他未发布草稿都不是正式去重基准。
     - input_skills/ 才是最终 shipped skill 来源；不要把 template_source/environment/skills/ 误当成 shipped skills。
@@ -324,6 +344,8 @@ export function buildTaskWriterPrompt(
     当前 task blueprint:
     ${JSON.stringify(plan, null, 2)}
 
+    造任务时必须完整使用 plan.json blueprint，尤其要围绕 realWorldContext、referenceData、taskGoal、inputAssets、requiredOutputs、verifierFocus 来设计输入资产、题面、输出契约和 verifier。
+    应尽可能的造出一个没有skill连gpt5.4都无法做出来的任务，且失败的细节必须是偏行动级别的失败、一些格式问题可以放宽松，但是有了skill以后，gpt5.4就可以稳定做出来。
     现在只生成一个完整派生任务，写入:
     - ${draftDirLabel}
 

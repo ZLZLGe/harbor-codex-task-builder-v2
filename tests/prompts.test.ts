@@ -83,10 +83,15 @@ const plan: DerivedTaskPlan = {
   taskRole: "similar",
   roleOrdinal: 1,
   title: "Debugging Similar 1",
-  goal: "Repair the failing dashboard service.",
+  realWorldContext: "A production dashboard team is investigating service connectivity incidents from real operations.",
+  referenceData: "Reference data:\n\n- Node.js net documentation: https://nodejs.org/api/net.html",
+  taskGoal: "Repair the failing dashboard service.",
+  inputAssets: "Provide offline service logs and a minimal Node.js connection fixture.",
+  requiredOutputs: "The agent must update the service config and produce a short incident note.",
+  verifierFocus: "Check connectivity behavior, config semantics, and the incident note contract.",
+  skillBenefitRationale: "Requires the injected debugging workflow.",
   difficulty: "hard",
   category: "debugging",
-  skillBenefitRationale: "Requires the injected debugging workflow.",
   templateId: template.templateId,
   skillMode: "per-skill",
   targetSkillDirName: debugSkill.dirName,
@@ -160,7 +165,15 @@ assert.doesNotMatch(brief, /drafts\//);
 
 assert.match(singleTaskPlannerPrompt, /当前只规划一个任务 similar1/);
 assert.match(singleTaskPlannerPrompt, /你只需要为当前槽位返回一个单题 blueprint/);
-assert.match(singleTaskPlannerPrompt, /只返回 schema 要求的 5 个字段：title、goal、difficulty、category、skillBenefitRationale/);
+assert.match(singleTaskPlannerPrompt, /web search/);
+assert.match(singleTaskPlannerPrompt, /referenceData/);
+assert.match(singleTaskPlannerPrompt, /realWorldContext/);
+assert.match(singleTaskPlannerPrompt, /taskGoal/);
+assert.match(singleTaskPlannerPrompt, /inputAssets/);
+assert.match(singleTaskPlannerPrompt, /requiredOutputs/);
+assert.match(singleTaskPlannerPrompt, /verifierFocus/);
+assert.match(singleTaskPlannerPrompt, /只返回 schema 要求的 10 个字段/);
+assert.doesNotMatch(singleTaskPlannerPrompt, /只返回 schema 要求的 5 个字段/);
 assert.match(singleTaskPlannerPrompt, /derivedTaskId、taskRole、roleOrdinal、templateId、skillMode、targetSkillDirName、targetSkillName 由程序补齐/);
 assert.match(singleTaskPlannerPrompt, /display name: Similar 1/);
 assert.match(singleTaskPlannerPrompt, /历史 attempt 和其他未发布草稿都不是正式去重基准/);
@@ -171,6 +184,7 @@ assert.doesNotMatch(singleTaskPlannerPrompt, /transferTasks/);
 assert.doesNotMatch(singleTaskPlannerPrompt, /primaryOutputFile/);
 
 assert.match(writerPrompt, /template_source\/、input_skills\/、当前 task 的 plan\.json blueprint/);
+assert.match(writerPrompt, /realWorldContext、referenceData、taskGoal、inputAssets、requiredOutputs、verifierFocus/);
 assert.doesNotMatch(writerPrompt, /builder_refs\/harbor/);
 assert.match(writerPrompt, /metadata\.source_template_id 必须等于 "tools__debugging"/);
 assert.match(writerPrompt, /environment\/skills\/ 中只能保留一个 shipped skill/);
@@ -179,6 +193,8 @@ assert.match(writerPrompt, /不是当前任务必须参考的去重对象/);
 assert.match(writerPrompt, /只以 final-root 下已经发布的 \*__with_skill 同 family 任务为准/);
 assert.match(writerPrompt, /不要把 \*__no_skill 对照副本当成历史任务/);
 assert.match(writerPrompt, /当前只允许修改 draft\/ 内的文件/);
+assert.match(writerPrompt, /非 skill 输入资产，应优先 COPY 到 WORKDIR 或其子目录/);
+assert.match(writerPrompt, /纯可执行工具可以放在 \/usr\/local\/bin/);
 assert.match(writerPrompt, /不得把 skills 复制到普通运行时路径/);
 assert.match(writerPrompt, /唯一允许语句是 COPY skills \/root\/\.codex\/skills/);
 assert.match(writerPrompt, /不要再添加任何把 skills\/ 或 \/root\/\.codex\/skills 复制、移动、同步、软链接到其他目录/);
@@ -205,6 +221,7 @@ assert.match(repairPrompt, /family workspace 根目录、历史 attempt、Harbor
 assert.match(repairPrompt, /你还可以读取这些本 attempt 的运行证据/);
 assert.match(repairPrompt, /metadata\.source_template_id/);
 assert.match(repairPrompt, /blocking reviewer:/);
+assert.match(repairPrompt, /非 skill 输入资产，应优先 COPY 到 WORKDIR 或其子目录/);
 assert.match(repairPrompt, /唯一允许语句是 COPY skills \/root\/\.codex\/skills/);
 assert.match(repairPrompt, /with_skill_pass__no_skill_invalid_fail/);
 assert.match(repairPrompt, /已发布 \*__with_skill sibling \/ 历史任务过近/);
