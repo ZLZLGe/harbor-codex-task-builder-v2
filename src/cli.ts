@@ -137,7 +137,7 @@ type ExecuteFamilyOptions = {
   skillEffectBaseUrl?: string;
 };
 
-type TaskSlot = Pick<DerivedTaskPlan, "derivedTaskId" | "taskRole" | "roleOrdinal">;
+type TaskSlot = Pick<DerivedTaskPlan, "derivedTaskId" | "taskOrdinal">;
 
 type TaskAttemptResult =
   | {
@@ -250,19 +250,11 @@ function buildOrdinalRange(count: number): number[] {
 }
 
 function resolvePendingOrdinals(unit: {
-  similarCount: number;
-  transferCount: number;
-  pendingSimilarOrdinals?: number[];
-  pendingTransferOrdinals?: number[];
-}): { similarOrdinals: number[]; transferOrdinals: number[] } {
-  const similarOrdinals =
-    Array.isArray(unit.pendingSimilarOrdinals) ? unit.pendingSimilarOrdinals : buildOrdinalRange(unit.similarCount);
-  const transferOrdinals =
-    Array.isArray(unit.pendingTransferOrdinals) ? unit.pendingTransferOrdinals : buildOrdinalRange(unit.transferCount);
-  return {
-    similarOrdinals,
-    transferOrdinals,
-  };
+  taskCount: number;
+  pendingTaskOrdinals?: number[];
+}): { taskOrdinals: number[] } {
+  const taskOrdinals = Array.isArray(unit.pendingTaskOrdinals) ? unit.pendingTaskOrdinals : buildOrdinalRange(unit.taskCount);
+  return { taskOrdinals };
 }
 
 function buildScopeMetadata(
@@ -278,10 +270,8 @@ function buildScopeMetadata(
     targetSkillName: unit.targetSkill?.name,
     inputSkillDirNames: unit.inputSkills.map((skill) => skill.dirName),
     inputSkillNames: unit.inputSkills.map((skill) => skill.name),
-    similarCount: unit.similarCount,
-    transferCount: unit.transferCount,
-    pendingSimilarOrdinals: unit.pendingSimilarOrdinals,
-    pendingTransferOrdinals: unit.pendingTransferOrdinals,
+    taskCount: unit.taskCount,
+    pendingTaskOrdinals: unit.pendingTaskOrdinals,
     finalFamilyDir: unit.finalFamilyDir,
     publishedTaskIds: unit.publishedTasks.map((task) => task.derivedTaskId),
     ...(runtimeEnvironment ? { runtimeEnvironment } : {}),
@@ -300,29 +290,16 @@ class TaskAttemptTimeoutError extends Error {
 }
 
 function buildTaskSlots(unit: GenerationUnit): TaskSlot[] {
-  const slots: TaskSlot[] = [];
-  for (const ordinal of unit.pendingSimilarOrdinals) {
-    slots.push({
-      derivedTaskId: `similar${ordinal}`,
-      taskRole: "similar",
-      roleOrdinal: ordinal,
-    });
-  }
-  for (const ordinal of unit.pendingTransferOrdinals) {
-    slots.push({
-      derivedTaskId: `transfer${ordinal}`,
-      taskRole: "transfer",
-      roleOrdinal: ordinal,
-    });
-  }
-  return slots;
+  return unit.pendingTaskOrdinals.map((ordinal) => ({
+    derivedTaskId: `task${ordinal}`,
+    taskOrdinal: ordinal,
+  }));
 }
 
 function buildSingleTaskUnit(unit: GenerationUnit, slot: TaskSlot): GenerationUnit {
   return {
     ...unit,
-    pendingSimilarOrdinals: slot.taskRole === "similar" ? [slot.roleOrdinal] : [],
-    pendingTransferOrdinals: slot.taskRole === "transfer" ? [slot.roleOrdinal] : [],
+    pendingTaskOrdinals: [slot.taskOrdinal],
   };
 }
 
@@ -333,8 +310,7 @@ function buildDerivedTaskPlan(
 ): DerivedTaskPlan {
   return {
     derivedTaskId: slot.derivedTaskId,
-    taskRole: slot.taskRole,
-    roleOrdinal: slot.roleOrdinal,
+    taskOrdinal: slot.taskOrdinal,
     title: plannedTask.title,
     realWorldContext: plannedTask.realWorldContext,
     referenceData: plannedTask.referenceData,
@@ -354,17 +330,12 @@ function buildDerivedTaskPlan(
 
 function buildTaskPlanValidationIssues(plan: DerivedTaskPlan, slot: TaskSlot): ValidationIssue[] {
   return validateTaskPlans([plan], {
-    similarOrdinals: slot.taskRole === "similar" ? [slot.roleOrdinal] : [],
-    transferOrdinals: slot.taskRole === "transfer" ? [slot.roleOrdinal] : [],
+    taskOrdinals: [slot.taskOrdinal],
   });
 }
 
 function removePendingSlot(unit: GenerationUnit, slot: TaskSlot): void {
-  if (slot.taskRole === "similar") {
-    unit.pendingSimilarOrdinals = unit.pendingSimilarOrdinals.filter((ordinal) => ordinal !== slot.roleOrdinal);
-    return;
-  }
-  unit.pendingTransferOrdinals = unit.pendingTransferOrdinals.filter((ordinal) => ordinal !== slot.roleOrdinal);
+  unit.pendingTaskOrdinals = unit.pendingTaskOrdinals.filter((ordinal) => ordinal !== slot.taskOrdinal);
 }
 
 function buildAttemptDeadlineAt(timeoutHours: number): number | null {
@@ -401,18 +372,10 @@ async function withAttemptDeadline<T>(
   }
 }
 
-function comparePublishedTasks(left: PublishedTaskInfo, right: PublishedTaskInfo): number {
-  if (left.taskRole !== right.taskRole) {
-    return left.taskRole === "similar" ? -1 : 1;
-  }
-  return left.roleOrdinal - right.roleOrdinal;
-}
-
 function buildPublishedTaskInfo(plan: DerivedTaskPlan, taskDir: string): PublishedTaskInfo {
   return {
     derivedTaskId: plan.derivedTaskId,
-    taskRole: plan.taskRole,
-    roleOrdinal: plan.roleOrdinal,
+    taskOrdinal: plan.taskOrdinal,
     taskDir,
     planPath: path.join(taskDir, "plan.json"),
     instructionPath: path.join(taskDir, "instruction.md"),
@@ -425,7 +388,7 @@ function buildPublishedTaskInfo(plan: DerivedTaskPlan, taskDir: string): Publish
 function upsertPublishedTask(unit: GenerationUnit, publishedTask: PublishedTaskInfo): void {
   const nextPublishedTasks = unit.publishedTasks.filter((task) => task.derivedTaskId !== publishedTask.derivedTaskId);
   nextPublishedTasks.push(publishedTask);
-  nextPublishedTasks.sort(comparePublishedTasks);
+  nextPublishedTasks.sort((left, right) => left.taskOrdinal - right.taskOrdinal);
   unit.publishedTasks = nextPublishedTasks;
 }
 
@@ -1244,6 +1207,10 @@ async function runPool<T, R>(items: T[], concurrency: number, worker: (item: T, 
 }
 
 function assertNoLegacyOptions(options: Options): void {
+  if (options["similar-count"] !== undefined || options["transfer-count"] !== undefined) {
+    throw new Error("similar-count 和 transfer-count 已移除，请改用 --task-count");
+  }
+
   const legacyKeys = [
     "source-root",
     "source-task-id",
@@ -1278,21 +1245,19 @@ async function loadUnitsForCommand(
   }
 
   const skillMode = getSkillModeOption(options);
-  const similarCount = getNumberOption(options, "similar-count", 1);
-  const transferCount = getNumberOption(options, "transfer-count", 3);
-  if (similarCount < 0 || transferCount < 0) {
-    throw new Error("similar-count 和 transfer-count 不能小于 0");
+  const taskCount = getNumberOption(options, "task-count", 4);
+  if (taskCount < 0) {
+    throw new Error("task-count 不能小于 0");
   }
-  if (similarCount + transferCount === 0) {
-    throw new Error("similar-count 和 transfer-count 不能同时为 0");
+  if (taskCount === 0) {
+    throw new Error("task-count 不能为 0");
   }
 
   const template = await discoverTaskTemplate(templateRelativePath, templateRoot);
   const inputSkills = await discoverInputSkills(skillDirs);
   let units = buildGenerationUnits(template, inputSkills, {
     skillMode,
-    similarCount,
-    transferCount,
+    taskCount,
   });
 
   const scopeSlug = getStringOption(options, "scope-slug");
@@ -1403,7 +1368,7 @@ async function main(): Promise<void> {
   const concurrency = getNumberOption(options, "concurrency", 1);
   const results = await runPool(units, concurrency, async (unit, index) => {
     console.log(
-      `[${index + 1}/${units.length}] 开始 ${unit.template.templateId}/${unit.scopeSlug} pending-similar=${unit.pendingSimilarOrdinals.length}/${unit.similarCount} pending-transfer=${unit.pendingTransferOrdinals.length}/${unit.transferCount}`,
+      `[${index + 1}/${units.length}] 开始 ${unit.template.templateId}/${unit.scopeSlug} pending-task=${unit.pendingTaskOrdinals.length}/${unit.taskCount}`,
     );
     const result = await executeFamilyGeneration(unit, executeOptions);
     console.log(`[${index + 1}/${units.length}] 完成 ${unit.template.templateId}/${unit.scopeSlug} status=${result.status}`);

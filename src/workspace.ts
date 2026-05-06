@@ -35,8 +35,7 @@ export type TaskAttemptWorkspace = {
   targetSkill: SkillInfo | null;
   scopeSlug: string;
   derivedTaskId: string;
-  taskRole: "similar" | "transfer";
-  roleOrdinal: number;
+  taskOrdinal: number;
   attemptIndex: number;
   rootDir: string;
   templateSourceDir: string;
@@ -92,7 +91,7 @@ export async function createFamilyWorkspace(
 export async function createTaskAttemptWorkspace(
   familyWorkspace: FamilyWorkspace,
   unit: GenerationUnit,
-  plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskRole" | "roleOrdinal">,
+  plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskOrdinal">,
   options: {
     attemptIndex: number;
   },
@@ -133,8 +132,7 @@ export async function createTaskAttemptWorkspace(
     targetSkill: familyWorkspace.targetSkill,
     scopeSlug: familyWorkspace.scopeSlug,
     derivedTaskId: plan.derivedTaskId,
-    taskRole: plan.taskRole,
-    roleOrdinal: plan.roleOrdinal,
+    taskOrdinal: plan.taskOrdinal,
     attemptIndex: options.attemptIndex,
     rootDir,
     templateSourceDir,

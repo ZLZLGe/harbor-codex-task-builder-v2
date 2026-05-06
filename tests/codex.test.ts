@@ -82,10 +82,8 @@ const unit = {
     dirName: "01__node-connect",
   },
   scopeSlug: "01__node-connect",
-  similarCount: 1,
-  transferCount: 0,
-  pendingSimilarOrdinals: [1],
-  pendingTransferOrdinals: [],
+  taskCount: 1,
+  pendingTaskOrdinals: [1],
   finalFamilyDir: "/tmp/final/tools__debugging/01__node-connect",
   publishedTasks: [],
 } as const;
@@ -95,9 +93,8 @@ const workspace = {
 } as const;
 
 const plan = {
-  derivedTaskId: "similar1",
-  taskRole: "similar",
-  roleOrdinal: 1,
+  derivedTaskId: "task1",
+  taskOrdinal: 1,
   title: "Investigate connection failures",
   realWorldContext: "A support engineering team is triaging real-world TCP connection failures.",
   referenceData: "Reference data:\n\n- Node.js net documentation: https://nodejs.org/api/net.html",
@@ -153,9 +150,8 @@ try {
     await assert.rejects(
       () =>
         client.planTask(unit as never, workspace as never, {
-          derivedTaskId: "similar1",
-          taskRole: "similar",
-          roleOrdinal: 1,
+          derivedTaskId: "task1",
+          taskOrdinal: 1,
         }),
       /plan failure/,
     );
@@ -196,9 +192,8 @@ try {
     });
 
     const result = await client.planTask(unit as never, workspace as never, {
-      derivedTaskId: "similar1",
-      taskRole: "similar",
-      roleOrdinal: 1,
+      derivedTaskId: "task1",
+      taskOrdinal: 1,
     });
     assert.equal(result.threadId, "plan-thread-4");
     assert.equal("primaryOutputFile" in result.data, false);
@@ -235,9 +230,8 @@ try {
       unit as never,
       workspace as never,
       {
-        derivedTaskId: "similar1",
-        taskRole: "similar",
-        roleOrdinal: 1,
+        derivedTaskId: "task1",
+        taskOrdinal: 1,
       },
     );
     assert.equal(result.threadId, "task-plan-thread-1");
@@ -277,7 +271,7 @@ try {
           finalResponse: JSON.stringify({
             taskResults: [
               {
-                derivedTaskId: "similar1",
+                derivedTaskId: "task1",
                 blockingPass: true,
                 blockingIssues: [],
               },

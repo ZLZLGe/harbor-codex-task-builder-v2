@@ -317,25 +317,22 @@ export function assertPathWithinRoots(targetPath: string, roots: string[], label
   throw new Error(`${label} 不在受管路径内: ${targetPath}`);
 }
 
-export function canonicalTaskName(taskRole: "similar" | "transfer", roleOrdinal: number): string {
-  return `${taskRole}${roleOrdinal}`;
+export function canonicalTaskName(taskOrdinal: number): string {
+  return `task${taskOrdinal}`;
 }
 
-export function parseCanonicalTaskName(
-  value: string,
-): { taskRole: "similar" | "transfer"; roleOrdinal: number } | null {
-  const match = /^(similar|transfer)([1-9]\d*)$/.exec(value.trim());
+export function parseCanonicalTaskName(value: string): { taskOrdinal: number } | null {
+  const match = /^task([1-9]\d*)$/.exec(value.trim());
   if (!match) {
     return null;
   }
 
-  const roleOrdinal = Number(match[2]);
-  if (!Number.isInteger(roleOrdinal) || roleOrdinal <= 0) {
+  const taskOrdinal = Number(match[1]);
+  if (!Number.isInteger(taskOrdinal) || taskOrdinal <= 0) {
     return null;
   }
 
   return {
-    taskRole: match[1] as "similar" | "transfer",
-    roleOrdinal,
+    taskOrdinal,
   };
 }

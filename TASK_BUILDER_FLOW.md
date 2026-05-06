@@ -89,8 +89,7 @@ PF bucket 镜像目录结构固定为：
   - `all-skills`：`all` 模式
   - `<input-skill-dirname>`：`per-skill` 模式
 - `task-name`
-  - `similar1`, `similar2`, ...
-  - `transfer1`, `transfer2`, ...
+  - `task1`, `task2`, ...
   - 正式扫描和复用只认 `*__with_skill`
   - `*__no_skill` 只是对照副本
 
@@ -137,9 +136,9 @@ PF bucket 镜像目录结构固定为：
 
 - `SingleTaskPlan`
   - planner 对当前单题槽位返回的 blueprint
-  - 只包含当前 task 需要的 `title / goal / difficulty / category / skillBenefitRationale`
+  - 只包含当前 task 需要的 `title / realWorldContext / referenceData / taskGoal / inputAssets / requiredOutputs / verifierFocus / skillBenefitRationale / difficulty / category`
 - `DerivedTaskPlan`
-  - 程序在当前槽位基础上补齐 `derivedTaskId / taskRole / roleOrdinal / templateId / skillMode / targetSkill*` 后得到的单任务蓝图
+  - 程序在当前槽位基础上补齐 `derivedTaskId / taskOrdinal / templateId / skillMode / targetSkill*` 后得到的单任务蓝图
 
 ## 5. CLI 入口
 
@@ -183,7 +182,7 @@ CLI 现在只保留两类命令：
 
 - `--limit`
   - 在完成 unit 发现、published-state 判断并筛出 executable units 后，最多执行前 N 个 unit
-  - 这是 unit 级限制，不是单个 family 内的 task 数量限制，也不是 similar / transfer 数量限制
+  - 这是 unit 级限制，不是单个 family 内的 task 数量限制
 - `--codex-run-retries`
   - 控制 builder 侧 planner / writer / review / repair 这四类 Codex `thread.run(...)` 调用在首次失败后最多额外重试几次
   - 默认值是 `3`
@@ -216,7 +215,7 @@ CLI 现在只保留两类命令：
 
 ### 第 2 步：构造 generation units
 
-程序根据 `--skill-mode`、`--similar-count`、`--transfer-count` 生成 `GenerationUnit`：
+程序根据 `--skill-mode`、`--task-count` 生成 `GenerationUnit`：
 
 - `all` 模式：当前 template + 全部 input skills 组成一个 unit
 - `per-skill` 模式：当前 template 的每个 input skill 各自形成一个 unit
@@ -231,30 +230,28 @@ CLI 现在只保留两类命令：
 
 下已经发布的任务：
 
-- 只识别已有的 `similarN__with_skill`
-- 只识别已有的 `transferN__with_skill`
+- 只识别已有的 `taskN__with_skill`
 - 会忽略对应的 `*__no_skill`
-- 也不会兼容旧布局 `<task-name>`
+- 也不会兼容旧布局 `<task-name>` 或旧的 `similarN__with_skill` / `transferN__with_skill`
 
 然后只补缺失槽位。
 
-如果显式传了 `--limit`，程序会在这些 executable units 上再应用一次数量裁剪，只继续执行前 N 个 unit；这里限制的是 unit 数量，不是单个 family 内的 task 数量，也不是 `similar-count` / `transfer-count`。
+如果显式传了 `--limit`，程序会在这些 executable units 上再应用一次数量裁剪，只继续执行前 N 个 unit；这里限制的是 unit 数量，不是单个 family 内的 task 数量，也不是 `task-count`。
 
 例如目标是：
 
-- `similar-count = 2`
-- `transfer-count = 3`
+- `task-count = 5`
 
 如果 final 里已经有：
 
-- `similar1`
-- `transfer1`
+- `task1`
 
 那么本轮只需要补：
 
-- `similar2`
-- `transfer2`
-- `transfer3`
+- `task2`
+- `task3`
+- `task4`
+- `task5`
 
 这一步的目的是避免重复造已经发布的任务。
 
@@ -313,8 +310,7 @@ task_attempts/<task-id>/attempt-<n>/
 
 当前版本不再先生成整份 family plan，而是按固定顺序逐槽位执行：
 
-- 全部 `similar` 按 `roleOrdinal` 升序
-- 全部 `transfer` 按 `roleOrdinal` 升序
+- 全部 `taskN` 按 `taskOrdinal` 升序
 
 也就是说：
 
@@ -326,7 +322,12 @@ task_attempts/<task-id>/attempt-<n>/
 1. 先创建当前 task 的 `attempt-<n>/`
 2. 在该 attempt 内调用单题 planner，只返回当前槽位的 blueprint 字段：
    - `title`
-   - `goal`
+   - `realWorldContext`
+   - `referenceData`
+   - `taskGoal`
+   - `inputAssets`
+   - `requiredOutputs`
+   - `verifierFocus`
    - `difficulty`
    - `category`
    - `skillBenefitRationale`
@@ -388,7 +389,7 @@ task blocking reviewer 的输出只有：
   - `name`
   - `description`
   - `source_template_id`
-  - `task_role`
+  - `task_role` 如存在只能是 `task`
 - `instruction.md`、`metadata.name`、`metadata.description` 是否包含中文
 - `environment/Dockerfile` 是否满足固定规则
 
@@ -588,4 +589,4 @@ output root 顶层还会额外写：
 
 ## 9. 一句话总结
 
-**当前 `codex_task_builder_v2` 的主流程是：先把 template 和 input skills 组装成 family unit，再按 `similar -> transfer` 的固定顺序逐槽位执行单题 planner；每个 task 都在独立的 `task_attempts/<task-id>/attempt-<n>/` 工作区内完成 writer、单题 blocking 审查、static validate、Harbor Oracle runtime 和 skill-effect 对照，并在超时或 repair 用尽时 fresh restart 到新的 attempt；默认 gate 开启时，某个任务只有在达到真正 PF 的 `with_skill_pass__no_skill_fail` 时才会把 `__with_skill` / `__no_skill` 两份快照一起发布到 `<output-root>/final`；如果显式关闭 skill-effect gate，则 runtime 通过后只发布 `__with_skill`，其他失败结果只留在 `raw`。**
+**当前 `codex_task_builder_v2` 的主流程是：先把 template 和 input skills 组装成 family unit，再按 `task1..taskN` 的固定顺序逐槽位执行单题 planner；每个 task 都在独立的 `task_attempts/<task-id>/attempt-<n>/` 工作区内完成 writer、单题 blocking 审查、static validate、Harbor Oracle runtime 和 skill-effect 对照，并在超时或 repair 用尽时 fresh restart 到新的 attempt；默认 gate 开启时，某个任务只有在达到真正 PF 的 `with_skill_pass__no_skill_fail` 时才会把 `__with_skill` / `__no_skill` 两份快照一起发布到 `<output-root>/final`；如果显式关闭 skill-effect gate，则 runtime 通过后只发布 `__with_skill`，其他失败结果只留在 `raw`。**

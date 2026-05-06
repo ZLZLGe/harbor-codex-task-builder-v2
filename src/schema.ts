@@ -41,7 +41,6 @@ function assertStructuredOutputCompatible(schema: JsonSchemaNode, label: string,
   }
 }
 
-export const taskRoleSchema = z.enum(["similar", "transfer"]);
 export const skillModeSchema = z.enum(["all", "per-skill"]);
 
 export const plannedTaskSchema = z.object({
@@ -61,8 +60,7 @@ export const singleTaskPlanSchema = plannedTaskSchema;
 
 export const derivedTaskPlanSchema = z.object({
   derivedTaskId: z.string().min(1),
-  taskRole: taskRoleSchema,
-  roleOrdinal: z.number().int().positive(),
+  taskOrdinal: z.number().int().positive(),
   title: z.string().min(1),
   realWorldContext: z.string().min(1),
   referenceData: z.string().min(1),

@@ -71,8 +71,7 @@ npm run generate-family -- \
   --skill-dir /Users/leviviya/Documents/Harbor/skills/tools/debugging/01__node-connect \
   --skill-dir /Users/leviviya/Documents/Harbor/skills/tools/debugging/03__session-logs \
   --skill-mode per-skill \
-  --similar-count 0 \
-  --transfer-count 1 \
+  --task-count 1 \
   --output-root /Users/leviviya/Documents/Harbor/.local-workspace/codex_task_builder_v2_debugging \
   --concurrency 1 \
   --codex-run-retries 3 \
@@ -89,8 +88,9 @@ npm run generate-family -- \
 - `--skill-mode`
   - `all`：把本次输入的全部 skill 一起作为 shipped skills
   - `per-skill`：每个输入 skill 各自生成一个 family unit
-- `--similar-count`
-- `--transfer-count`
+- `--task-count`
+  - 可选，控制每个 family unit 生成 `task1..taskN` 的统一槽位数量
+  - 默认值是 `4`
 - `--scope-slug`
   - 可选，只跑某个 unit，例如 `01__node-connect`
 - `--output-root`
@@ -148,10 +148,10 @@ npm run generate-family -- \
 ```text
 /Users/leviviya/Documents/Harbor/.local-workspace/codex_task_builder_v2_debugging/
 raw/20260410.../tools__debugging/01__node-connect/...
-final/tools__debugging/01__node-connect/transfer1__with_skill
-final/tools__debugging/01__node-connect/transfer1__no_skill
-final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__node-connect/transfer1__with_skill
-final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__node-connect/transfer1__no_skill
+final/tools__debugging/01__node-connect/task1__with_skill
+final/tools__debugging/01__node-connect/task1__no_skill
+final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__node-connect/task1__with_skill
+final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__node-connect/task1__no_skill
 ```
 
 补充语义：
@@ -187,8 +187,8 @@ final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__
 当前执行模型是：
 
 - 改为 task 级单题 planner + 串行执行
-  - 固定顺序是 `similar1..N` 先于 `transfer1..N`
-  - planner 当前只返回 `title / goal / difficulty / category / skillBenefitRationale`
+  - 固定顺序是 `task1..taskN`
+  - planner 当前只返回单题 blueprint 字段，不返回 `derivedTaskId` / `taskOrdinal`
   - 每个 task 单独经历 `single-task planner -> write -> blocking review -> static validate -> runtime -> skill-effect -> repair`
   - 每次 fresh restart 都会切到新的 `task_attempts/<task>/attempt-<n>/` 工作区
   - `skill-effect` 内部会在变体准备完成后默认并行运行 `with_skill` / `no_skill`
@@ -238,6 +238,8 @@ skill-effect gate 现在进一步区分：
 - `--final-root`
 - `--quarantine-root`
 - `--runs-root`
+- `--similar-count`
+- `--transfer-count`
 
 下面这些旧命令已经移除：
 

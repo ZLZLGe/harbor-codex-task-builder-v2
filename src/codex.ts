@@ -477,7 +477,7 @@ export class CodexTaskBuilderClient {
   async planTask(
     unit: GenerationUnit,
     workspace: WorkspaceRootProvider,
-    plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskRole" | "roleOrdinal">,
+    plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskOrdinal">,
     options: {
       signal?: AbortSignal;
     } = {},

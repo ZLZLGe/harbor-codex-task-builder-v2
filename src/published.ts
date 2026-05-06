@@ -6,30 +6,20 @@ import { parseCanonicalTaskName, pathExists } from "./utils.js";
 export type PublishedFamilyState = {
   finalFamilyDir: string;
   publishedTasks: PublishedTaskInfo[];
-  pendingSimilarOrdinals: number[];
-  pendingTransferOrdinals: number[];
+  pendingTaskOrdinals: number[];
 };
 
 function buildOrdinalRange(count: number): number[] {
   return Array.from({ length: Math.max(0, count) }, (_, index) => index + 1);
 }
 
-function comparePublishedTasks(left: PublishedTaskInfo, right: PublishedTaskInfo): number {
-  if (left.taskRole !== right.taskRole) {
-    return left.taskRole === "similar" ? -1 : 1;
-  }
-  return left.roleOrdinal - right.roleOrdinal;
-}
-
-function parsePublishedVariantDirName(
-  value: string,
-): { derivedTaskId: string; taskRole: "similar" | "transfer"; roleOrdinal: number } | null {
-  const match = /^(similar|transfer)([1-9]\d*)__with_skill$/.exec(value.trim());
+function parsePublishedVariantDirName(value: string): { derivedTaskId: string; taskOrdinal: number } | null {
+  const match = /^(task[1-9]\d*)__with_skill$/.exec(value.trim());
   if (!match) {
     return null;
   }
 
-  const derivedTaskId = `${match[1]}${match[2]}`;
+  const derivedTaskId = match[1]!;
   const parsed = parseCanonicalTaskName(derivedTaskId);
   if (!parsed) {
     return null;
@@ -37,19 +27,17 @@ function parsePublishedVariantDirName(
 
   return {
     derivedTaskId,
-    taskRole: parsed.taskRole,
-    roleOrdinal: parsed.roleOrdinal,
+    taskOrdinal: parsed.taskOrdinal,
   };
 }
 
 export async function inspectPublishedFamily(
-  unit: Pick<GenerationUnit, "template" | "scopeSlug" | "similarCount" | "transferCount">,
+  unit: Pick<GenerationUnit, "template" | "scopeSlug" | "taskCount">,
   finalRoot: string,
 ): Promise<PublishedFamilyState> {
   const finalFamilyDir = path.join(finalRoot, unit.template.templateId, unit.scopeSlug);
   const publishedTasks: PublishedTaskInfo[] = [];
-  const existingSimilarOrdinals = new Set<number>();
-  const existingTransferOrdinals = new Set<number>();
+  const existingTaskOrdinals = new Set<number>();
 
   if (await pathExists(finalFamilyDir)) {
     const entries = await fs.readdir(finalFamilyDir, { withFileTypes: true });
@@ -66,8 +54,7 @@ export async function inspectPublishedFamily(
       const taskDir = path.join(finalFamilyDir, entry.name);
       const taskInfo: PublishedTaskInfo = {
         derivedTaskId: parsed.derivedTaskId,
-        taskRole: parsed.taskRole,
-        roleOrdinal: parsed.roleOrdinal,
+        taskOrdinal: parsed.taskOrdinal,
         taskDir,
         planPath: path.join(taskDir, "plan.json"),
         instructionPath: path.join(taskDir, "instruction.md"),
@@ -76,23 +63,16 @@ export async function inspectPublishedFamily(
         environmentDir: path.join(taskDir, "environment"),
       };
       publishedTasks.push(taskInfo);
-      if (parsed.taskRole === "similar") {
-        existingSimilarOrdinals.add(parsed.roleOrdinal);
-      } else {
-        existingTransferOrdinals.add(parsed.roleOrdinal);
-      }
+      existingTaskOrdinals.add(parsed.taskOrdinal);
     }
   }
 
-  publishedTasks.sort(comparePublishedTasks);
+  publishedTasks.sort((left, right) => left.taskOrdinal - right.taskOrdinal);
 
   return {
     finalFamilyDir,
     publishedTasks,
-    pendingSimilarOrdinals: buildOrdinalRange(unit.similarCount).filter((ordinal) => !existingSimilarOrdinals.has(ordinal)),
-    pendingTransferOrdinals: buildOrdinalRange(unit.transferCount).filter(
-      (ordinal) => !existingTransferOrdinals.has(ordinal),
-    ),
+    pendingTaskOrdinals: buildOrdinalRange(unit.taskCount).filter((ordinal) => !existingTaskOrdinals.has(ordinal)),
   };
 }
 
@@ -101,18 +81,15 @@ export function applyPublishedFamilyState(unit: GenerationUnit, state: Published
     ...unit,
     finalFamilyDir: state.finalFamilyDir,
     publishedTasks: state.publishedTasks,
-    pendingSimilarOrdinals: state.pendingSimilarOrdinals,
-    pendingTransferOrdinals: state.pendingTransferOrdinals,
+    pendingTaskOrdinals: state.pendingTaskOrdinals,
   };
 }
 
-export function hasPendingTasks(
-  unit: Pick<GenerationUnit, "pendingSimilarOrdinals" | "pendingTransferOrdinals">,
-): boolean {
-  return unit.pendingSimilarOrdinals.length + unit.pendingTransferOrdinals.length > 0;
+export function hasPendingTasks(unit: Pick<GenerationUnit, "pendingTaskOrdinals">): boolean {
+  return unit.pendingTaskOrdinals.length > 0;
 }
 
-export function selectExecutableUnits<T extends Pick<GenerationUnit, "pendingSimilarOrdinals" | "pendingTransferOrdinals">>(
+export function selectExecutableUnits<T extends Pick<GenerationUnit, "pendingTaskOrdinals">>(
   units: T[],
   limit = 0,
 ): {

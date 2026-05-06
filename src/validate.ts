@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { buildRoleDisplayName } from "./prompts.js";
+import { buildTaskDisplayName } from "./prompts.js";
 import { getVisibleSkills, type GenerationUnit } from "./discovery.js";
 import type { BlockingReviewResult, DerivedTaskPlan } from "./schema.js";
 import {
@@ -236,8 +236,7 @@ function runtimeIssue(taskId: string, message: string): ValidationIssue {
 export function validateTaskPlans(
   taskPlans: DerivedTaskPlan[],
   options: {
-    similarOrdinals: number[];
-    transferOrdinals: number[];
+    taskOrdinals: number[];
   },
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
@@ -247,29 +246,19 @@ export function validateTaskPlans(
     issues.push({ scope: "family", message: "derivedTaskId 存在重复" });
   }
 
-  const similarTasks = taskPlans.filter((task) => task.taskRole === "similar");
-  const transferTasks = taskPlans.filter((task) => task.taskRole === "transfer");
-
-  if (similarTasks.length !== options.similarOrdinals.length) {
+  if (taskPlans.length !== options.taskOrdinals.length) {
     issues.push({
       scope: "family",
-      message: `similar 任务数量错误，期望 ${options.similarOrdinals.length}，实际 ${similarTasks.length}`,
+      message: `task 任务数量错误，期望 ${options.taskOrdinals.length}，实际 ${taskPlans.length}`,
     });
   }
 
-  if (transferTasks.length !== options.transferOrdinals.length) {
-    issues.push({
-      scope: "family",
-      message: `transfer 任务数量错误，期望 ${options.transferOrdinals.length}，实际 ${transferTasks.length}`,
-    });
-  }
-
-  for (const [index, task] of similarTasks.entries()) {
-    const expectedOrdinal = options.similarOrdinals[index];
+  for (const [index, task] of taskPlans.entries()) {
+    const expectedOrdinal = options.taskOrdinals[index];
     if (!expectedOrdinal) {
       continue;
     }
-    const expectedId = canonicalTaskName("similar", expectedOrdinal);
+    const expectedId = canonicalTaskName(expectedOrdinal);
     if (task.derivedTaskId !== expectedId) {
       issues.push({
         scope: "family",
@@ -277,33 +266,11 @@ export function validateTaskPlans(
         message: `任务短名应为 ${expectedId}，当前为 ${task.derivedTaskId}`,
       });
     }
-    if (task.roleOrdinal !== expectedOrdinal) {
+    if (task.taskOrdinal !== expectedOrdinal) {
       issues.push({
         scope: "family",
         taskId: task.derivedTaskId,
-        message: `similar 任务序号应为 ${expectedOrdinal}，当前为 ${task.roleOrdinal}`,
-      });
-    }
-  }
-
-  for (const [index, task] of transferTasks.entries()) {
-    const expectedOrdinal = options.transferOrdinals[index];
-    if (!expectedOrdinal) {
-      continue;
-    }
-    const expectedId = canonicalTaskName("transfer", expectedOrdinal);
-    if (task.derivedTaskId !== expectedId) {
-      issues.push({
-        scope: "family",
-        taskId: task.derivedTaskId,
-        message: `任务短名应为 ${expectedId}，当前为 ${task.derivedTaskId}`,
-      });
-    }
-    if (task.roleOrdinal !== expectedOrdinal) {
-      issues.push({
-        scope: "family",
-        taskId: task.derivedTaskId,
-        message: `transfer 任务序号应为 ${expectedOrdinal}，当前为 ${task.roleOrdinal}`,
+        message: `task 任务序号应为 ${expectedOrdinal}，当前为 ${task.taskOrdinal}`,
       });
     }
   }
@@ -314,18 +281,15 @@ export function validateTaskPlans(
 export function collectFamilyObservationIssues(
   taskPlans: DerivedTaskPlan[],
   options: {
-    similarCount: number;
-    transferCount: number;
+    taskCount: number;
   },
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  const similarCount = taskPlans.filter((task) => task.taskRole === "similar").length;
-  const transferCount = taskPlans.filter((task) => task.taskRole === "transfer").length;
 
-  if (similarCount !== options.similarCount || transferCount !== options.transferCount) {
+  if (taskPlans.length !== options.taskCount) {
     issues.push({
       scope: "family",
-      message: `family 角色布局不是 ${options.similarCount} 个 similar + ${options.transferCount} 个 transfer`,
+      message: `family task 数量不是 ${options.taskCount} 个`,
     });
   }
 
@@ -846,11 +810,11 @@ export async function validateDraftStatic(
       });
     }
 
-    if (!metadataName.includes(buildRoleDisplayName(plan))) {
+    if (!metadataName.includes(buildTaskDisplayName(plan))) {
       issues.push({
         scope: "static",
         taskId: plan.derivedTaskId,
-        message: `task.toml metadata.name 未显式包含 ${buildRoleDisplayName(plan)}`,
+        message: `task.toml metadata.name 未显式包含 ${buildTaskDisplayName(plan)}`,
       });
     }
 
@@ -896,11 +860,11 @@ export async function validateDraftStatic(
       });
     }
 
-    if (metadataTaskRole !== plan.taskRole) {
+    if (metadataTaskRole && metadataTaskRole !== "task") {
       issues.push({
         scope: "static",
         taskId: plan.derivedTaskId,
-        message: `task.toml metadata.task_role=${metadataTaskRole ?? "missing"} 与 blueprint 不一致`,
+        message: `task.toml metadata.task_role=${metadataTaskRole} 已废弃；如果保留只能是 task`,
       });
     }
 

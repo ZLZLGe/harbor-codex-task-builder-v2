@@ -52,37 +52,33 @@ const unit: GenerationUnit = {
   targetSkill: debugSkill,
   scopeSlug: "01__node-connect",
   scopeLabel: "Node Connect",
-  similarCount: 2,
-  transferCount: 3,
-  pendingSimilarOrdinals: [1, 2],
-  pendingTransferOrdinals: [1, 2, 3],
+  taskCount: 5,
+  pendingTaskOrdinals: [1, 2, 3, 4, 5],
   finalFamilyDir: "/tmp/output/final/tools__debugging/01__node-connect",
   publishedTasks: [],
 };
 
 const historyAwareUnit: GenerationUnit = {
   ...unit,
-  pendingSimilarOrdinals: [2],
+  pendingTaskOrdinals: [2],
   publishedTasks: [
     {
-      derivedTaskId: "similar1",
-      taskRole: "similar",
-      roleOrdinal: 1,
-      taskDir: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill",
-      planPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/plan.json",
-      instructionPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/instruction.md",
-      taskTomlPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/task.toml",
-      testOutputsPath: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/tests/test_outputs.py",
-      environmentDir: "/tmp/output/final/tools__debugging/01__node-connect/similar1__with_skill/environment",
+      derivedTaskId: "task1",
+      taskOrdinal: 1,
+      taskDir: "/tmp/output/final/tools__debugging/01__node-connect/task1__with_skill",
+      planPath: "/tmp/output/final/tools__debugging/01__node-connect/task1__with_skill/plan.json",
+      instructionPath: "/tmp/output/final/tools__debugging/01__node-connect/task1__with_skill/instruction.md",
+      taskTomlPath: "/tmp/output/final/tools__debugging/01__node-connect/task1__with_skill/task.toml",
+      testOutputsPath: "/tmp/output/final/tools__debugging/01__node-connect/task1__with_skill/tests/test_outputs.py",
+      environmentDir: "/tmp/output/final/tools__debugging/01__node-connect/task1__with_skill/environment",
     },
   ],
 };
 
 const plan: DerivedTaskPlan = {
-  derivedTaskId: "similar1",
-  taskRole: "similar",
-  roleOrdinal: 1,
-  title: "Debugging Similar 1",
+  derivedTaskId: "task1",
+  taskOrdinal: 1,
+  title: "Debugging Task 1",
   realWorldContext: "A production dashboard team is investigating service connectivity incidents from real operations.",
   referenceData: "Reference data:\n\n- Node.js net documentation: https://nodejs.org/api/net.html",
   taskGoal: "Repair the failing dashboard service.",
@@ -103,8 +99,7 @@ const brief = buildTaskAttemptBrief(unit, plan, {
 });
 const singleTaskPlannerPrompt = buildSingleTaskPlannerPrompt(unit, {
   derivedTaskId: plan.derivedTaskId,
-  taskRole: plan.taskRole,
-  roleOrdinal: plan.roleOrdinal,
+  taskOrdinal: plan.taskOrdinal,
 });
 const writerPrompt = buildTaskWriterPrompt(unit, plan);
 const blockingReviewerPrompt = buildBlockingReviewerPrompt(unit, plan);
@@ -113,23 +108,25 @@ const historyBlockingReviewerPrompt = buildBlockingReviewerPrompt(historyAwareUn
 const repairPrompt = buildRepairPrompt({
   unit,
   plan,
-  blockingIssues: ["reviewer:similar1 instruction.md leaked the skill name"],
-  staticIssues: ["static:similar1 task.toml metadata.source_template_id is wrong"],
-  runtimeIssues: ["runtime:similar1 harbor verifier reward=0 < 1.0"],
-  skillEffectIssues: ["skill-effect:similar1 with_skill_pass__no_skill_invalid_fail"],
+  blockingIssues: ["reviewer:task1 instruction.md leaked the skill name"],
+  staticIssues: ["static:task1 task.toml metadata.source_template_id is wrong"],
+  runtimeIssues: ["runtime:task1 harbor verifier reward=0 < 1.0"],
+  skillEffectIssues: ["skill-effect:task1 with_skill_pass__no_skill_invalid_fail"],
 });
 
 const allModeUnit = buildGenerationUnits(template, [debugSkill, sessionSkill], {
   skillMode: "all",
-  similarCount: 1,
-  transferCount: 1,
+  taskCount: 2,
+})[0];
+const threeTaskUnit = buildGenerationUnits(template, [debugSkill], {
+  skillMode: "per-skill",
+  taskCount: 3,
 })[0];
 const allModeBrief = buildTaskAttemptBrief(
   allModeUnit!,
   {
-    derivedTaskId: "similar1",
-    taskRole: "similar",
-    roleOrdinal: 1,
+    derivedTaskId: "task1",
+    taskOrdinal: 1,
   },
   {
     attemptIndex: 1,
@@ -137,8 +134,9 @@ const allModeBrief = buildTaskAttemptBrief(
 );
 
 assert.equal(allModeUnit?.scopeSlug, "all-skills");
+assert.deepEqual(threeTaskUnit?.pendingTaskOrdinals, [1, 2, 3]);
 
-assert.match(brief, /当前 task: similar1 \(Similar 1\)/);
+assert.match(brief, /当前 task: task1 \(Task 1\)/);
 assert.match(brief, /当前 attempt: attempt-2/);
 assert.match(brief, /当前唯一允许修改的任务目录: draft\//);
 assert.match(brief, /当前证据目录: artifacts\//);
@@ -163,7 +161,7 @@ assert.doesNotMatch(brief, /similarTasks/);
 assert.doesNotMatch(brief, /transferTasks/);
 assert.doesNotMatch(brief, /drafts\//);
 
-assert.match(singleTaskPlannerPrompt, /当前只规划一个任务 similar1/);
+assert.match(singleTaskPlannerPrompt, /当前只规划一个任务 task1/);
 assert.match(singleTaskPlannerPrompt, /你只需要为当前槽位返回一个单题 blueprint/);
 assert.match(singleTaskPlannerPrompt, /web search/);
 assert.match(singleTaskPlannerPrompt, /referenceData/);
@@ -174,8 +172,8 @@ assert.match(singleTaskPlannerPrompt, /requiredOutputs/);
 assert.match(singleTaskPlannerPrompt, /verifierFocus/);
 assert.match(singleTaskPlannerPrompt, /只返回 schema 要求的 10 个字段/);
 assert.doesNotMatch(singleTaskPlannerPrompt, /只返回 schema 要求的 5 个字段/);
-assert.match(singleTaskPlannerPrompt, /derivedTaskId、taskRole、roleOrdinal、templateId、skillMode、targetSkillDirName、targetSkillName 由程序补齐/);
-assert.match(singleTaskPlannerPrompt, /display name: Similar 1/);
+assert.match(singleTaskPlannerPrompt, /derivedTaskId、taskOrdinal、templateId、skillMode、targetSkillDirName、targetSkillName 由程序补齐/);
+assert.match(singleTaskPlannerPrompt, /display name: Task 1/);
 assert.match(singleTaskPlannerPrompt, /历史 attempt 和其他未发布草稿都不是正式去重基准/);
 assert.doesNotMatch(singleTaskPlannerPrompt, /family planner/);
 assert.doesNotMatch(singleTaskPlannerPrompt, /familyTheme/);
@@ -201,14 +199,14 @@ assert.match(writerPrompt, /不要再添加任何把 skills\/ 或 \/root\/\.code
 assert.doesNotMatch(writerPrompt, /primaryOutputFile/);
 assert.doesNotMatch(writerPrompt, /primary_output_file/);
 assert.match(historyWriterPrompt, /已发布 Harbor family 目录/);
-assert.match(historyWriterPrompt, /similar1__with_skill/);
+assert.match(historyWriterPrompt, /task1__with_skill/);
 
 assert.match(blockingReviewerPrompt, /单题 blocking 审查/);
 assert.match(blockingReviewerPrompt, /writer 不应改写 injected skill payload/);
 assert.match(blockingReviewerPrompt, /taskResults 中只返回当前这个任务/);
 assert.match(blockingReviewerPrompt, /已发布 \*__with_skill sibling \/ 历史任务/);
 assert.doesNotMatch(blockingReviewerPrompt, /builder_refs\/harbor/);
-assert.match(blockingReviewerPrompt, /当前 task:\s+- similar1 \(Similar 1\) -> draft\//);
+assert.match(blockingReviewerPrompt, /当前 task:\s+- task1 \(Task 1\) -> draft\//);
 assert.match(blockingReviewerPrompt, /当前只审这个 task 的当前 attempt/);
 assert.doesNotMatch(blockingReviewerPrompt, /当前 family 规划:/);
 assert.match(historyBlockingReviewerPrompt, /已发布 Harbor family 目录/);

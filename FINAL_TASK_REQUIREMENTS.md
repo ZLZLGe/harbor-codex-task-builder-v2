@@ -51,7 +51,7 @@ PF skill-effect bucket 镜像目录固定为：
   - `all` 模式固定为 `all-skills`
   - `per-skill` 模式固定为目标 input skill 的 `dirName`
 - `task-name`
-  - 只能是 `similar1`、`similar2`、`transfer1`、`transfer2` 这类 canonical name
+  - 只能是 `task1`、`task2` 这类 canonical name
   - published scan / 历史去重 / 重复运行复用只认 `*__with_skill`
   - `*__no_skill` 只是对照副本，不参与历史任务集合
 
@@ -63,7 +63,7 @@ PF skill-effect bucket 镜像目录固定为：
 
 family 层要求：
 
-- `similar` / `transfer` 的数量必须与本轮目标一致
+- `task` 数量必须与本轮 `--task-count` 目标一致
 - family 规划上应让不同任务在任务场景、输入资产、输出语义和验证方式上拉开差异
 - 当前硬 gate 的去重主要针对 `final` 中已发布的同 family sibling / 历史任务
 
@@ -85,10 +85,14 @@ family 层要求：
 - `plan.json` 当前实现仍会保留，不能删除或改名
 - `plan.json` 必须是可解析 JSON，且至少应包含：
   - `derivedTaskId`
-  - `taskRole`
-  - `roleOrdinal`
+  - `taskOrdinal`
   - `title`
-  - `goal`
+  - `realWorldContext`
+  - `referenceData`
+  - `taskGoal`
+  - `inputAssets`
+  - `requiredOutputs`
+  - `verifierFocus`
   - `difficulty`
   - `category`
   - `skillBenefitRationale`
@@ -119,15 +123,14 @@ family 层要求：
 - `category`
 - `tags`
 - `source_template_id`
-- `task_role`
 
 并且必须满足：
 
 - `metadata.id` 必须等于当前 `derivedTaskId`
-- `metadata.name` 必须显式包含 `Similar N` 或 `Transfer N`
+- `metadata.name` 必须显式包含 `Task N`
 - `metadata.name` 与 `metadata.description` 必须使用英文
 - `metadata.source_template_id` 必须与当前 `templateId` 一致
-- `metadata.task_role` 必须与任务角色一致
+- `metadata.task_role` 如保留，只能写成 `task`；不得写旧的角色语义
 - `tags` 不能为空
 
 `[environment]` 必须固定为：
@@ -404,7 +407,7 @@ scope 约束：
 
 当前执行语义还有两个关键点：
 
-- 任务按 `similar -> transfer` 的顺序逐个执行
+- 任务按 `task1..taskN` 的顺序逐个执行
 - 某个任务一旦达到 `with_skill_pass__no_skill_fail`，会立即发布到 `final`，不会等待同 family 其他任务结束
 
 因此同一个 family 允许出现：

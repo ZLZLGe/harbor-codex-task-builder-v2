@@ -80,14 +80,14 @@ function makeEvaluation(
   const evaluation = makeEvaluation("pass", "valid_reward_fail");
   assert.equal(evaluation.bucket, "with_skill_pass__no_skill_fail");
   assert.equal(evaluation.repairRequired, false);
-  assert.deepEqual(buildSkillEffectIssues("similar1", evaluation), []);
+  assert.deepEqual(buildSkillEffectIssues("task1", evaluation), []);
 }
 
 {
   const evaluation = makeEvaluation("pass", "invalid_fail");
   assert.equal(evaluation.bucket, "with_skill_pass__no_skill_invalid_fail");
   assert.equal(evaluation.repairRequired, true);
-  const issues = buildSkillEffectIssues("similar1", evaluation);
+  const issues = buildSkillEffectIssues("task1", evaluation);
   assert.ok(issues.some((issue) => issue.message.includes("no_skill invalid fail")));
 }
 
@@ -132,7 +132,7 @@ function makeEvaluation(
   evaluation.noSkill.evidence.metrics = noSkillMetrics;
   const resultPath = await writeSkillEffectResultArtifact({
     artifactsDir,
-    derivedTaskId: "similar1",
+    derivedTaskId: "task1",
     cycle: 3,
     attemptIndex: 2,
     result: evaluation,
@@ -140,11 +140,11 @@ function makeEvaluation(
 
   assert.equal(
     resultPath,
-    path.join(artifactsDir, "similar1.skill-effect.cycle-3.attempt-2.json"),
+    path.join(artifactsDir, "task1.skill-effect.cycle-3.attempt-2.json"),
   );
   assert.equal(await pathExists(resultPath), true);
   assert.equal(
-    await pathExists(path.join(artifactsDir, "similar1.skill-effect.cycle-3.json")),
+    await pathExists(path.join(artifactsDir, "task1.skill-effect.cycle-3.json")),
     false,
   );
   const saved = JSON.parse(await readText(resultPath)) as SkillEffectEvaluationResult;
@@ -166,7 +166,7 @@ function makeEvaluation(
     runId: "run-parallel",
   } as const;
   const plan = {
-    derivedTaskId: "similar1",
+    derivedTaskId: "task1",
   } as const;
 
   const evaluationPromise = runSkillEffectEvaluation({
@@ -229,7 +229,7 @@ function makeEvaluation(
     runId: "run-reject",
   } as const;
   const plan = {
-    derivedTaskId: "similar1",
+    derivedTaskId: "task1",
   } as const;
   const withSkillError = new Error("with_skill failed");
 

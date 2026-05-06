@@ -30,6 +30,7 @@ import {
   ensureDir,
   pathExists,
   readText,
+  runCommand,
   writeText,
 } from "../src/utils.js";
 import {
@@ -89,10 +90,8 @@ const perSkillUnit: GenerationUnit = {
   targetSkill: nodeConnectSkill,
   scopeSlug: nodeConnectSkill.dirName,
   scopeLabel: nodeConnectSkill.name,
-  similarCount: 1,
-  transferCount: 1,
-  pendingSimilarOrdinals: [1],
-  pendingTransferOrdinals: [1],
+  taskCount: 2,
+  pendingTaskOrdinals: [1, 2],
   finalFamilyDir: "/tmp/final/tools__debugging/01__node-connect",
   publishedTasks: [],
 };
@@ -104,19 +103,16 @@ const allSkillUnit: GenerationUnit = {
   targetSkill: null,
   scopeSlug: "all-skills",
   scopeLabel: "All input skills",
-  similarCount: 1,
-  transferCount: 1,
-  pendingSimilarOrdinals: [1],
-  pendingTransferOrdinals: [1],
+  taskCount: 2,
+  pendingTaskOrdinals: [1, 2],
   finalFamilyDir: "/tmp/final/tools__debugging/all-skills",
   publishedTasks: [],
 };
 
 const plan: DerivedTaskPlan = {
-  derivedTaskId: "transfer1",
-  taskRole: "transfer",
-  roleOrdinal: 1,
-  title: "Transfer 1",
+  derivedTaskId: "task1",
+  taskOrdinal: 1,
+  title: "Task 1",
   realWorldContext: "A platform team is investigating real service connectivity failures.",
   referenceData: "Reference data:\n\n- Node.js net documentation: https://nodejs.org/api/net.html",
   taskGoal: "Repair the failing service.",
@@ -170,7 +166,7 @@ async function makeDraftFixture(
 
 [metadata]
 id = "${taskPlan.derivedTaskId}"
-name = "${taskPlan.taskRole === "similar" ? "Similar" : "Transfer"} ${taskPlan.roleOrdinal} | Fixture"
+name = "Task ${taskPlan.taskOrdinal} | Fixture"
 description = "Fixture task."
 author_name = "Test Author"
 author_email = "test@example.com"
@@ -178,7 +174,7 @@ difficulty = "${taskPlan.difficulty}"
 category = "${taskPlan.category}"
 tags = ["debugging", "fixture"]
 ${legacyPrimaryOutputFileLine}source_template_id = "${options.sourceTemplateId ?? taskPlan.templateId}"
-task_role = "${taskPlan.taskRole}"
+task_role = "task"
 
 [environment]
 cpus = 2
@@ -201,10 +197,9 @@ gpus = 0
 {
   const taskPlans: DerivedTaskPlan[] = [
     {
-      derivedTaskId: "similar1",
-      taskRole: "similar",
-      roleOrdinal: 1,
-      title: "Similar 1",
+      derivedTaskId: "task1",
+      taskOrdinal: 1,
+      title: "Task 1",
       realWorldContext: "A",
       referenceData: "Reference data:\n\n- Source A: https://example.com/a",
       taskGoal: "A",
@@ -220,10 +215,9 @@ gpus = 0
       targetSkillName: nodeConnectSkill.name,
     },
     {
-      derivedTaskId: "transfer1",
-      taskRole: "transfer",
-      roleOrdinal: 1,
-      title: "Transfer 1",
+      derivedTaskId: "task2",
+      taskOrdinal: 2,
+      title: "Task 2",
       realWorldContext: "B",
       referenceData: "Reference data:\n\n- Source B: https://example.com/b",
       taskGoal: "B",
@@ -240,7 +234,7 @@ gpus = 0
     },
   ];
 
-  assert.deepEqual(validateTaskPlans(taskPlans, { similarOrdinals: [1], transferOrdinals: [1] }), []);
+  assert.deepEqual(validateTaskPlans(taskPlans, { taskOrdinals: [1, 2] }), []);
 }
 
 {
@@ -313,9 +307,8 @@ gpus = 0
 {
   const allModePlan: DerivedTaskPlan = {
     ...plan,
-    derivedTaskId: "similar1",
-    taskRole: "similar",
-    roleOrdinal: 1,
+    derivedTaskId: "task1",
+    taskOrdinal: 1,
     skillMode: "all",
     targetSkillDirName: "",
     targetSkillName: "",
@@ -353,7 +346,7 @@ gpus = 0
   const finalRoot = buildFinalRoot(outputRoot);
   await Promise.all([ensureDir(rawRoot), ensureDir(finalRoot)]);
 
-  const sourceDraftDir = path.join(rawRoot, "run-1", template.templateId, nodeConnectSkill.dirName, "transfer1");
+  const sourceDraftDir = path.join(rawRoot, "run-1", template.templateId, nodeConnectSkill.dirName, "task1");
   await ensureDir(sourceDraftDir);
   await writeText(path.join(sourceDraftDir, "task.toml"), "x\n");
   await writeText(path.join(sourceDraftDir, "instruction.md"), "x\n");
@@ -366,70 +359,80 @@ gpus = 0
     sourceDraftDir,
     templateId: template.templateId,
     scopeSlug: nodeConnectSkill.dirName,
-    taskName: "transfer1__with_skill",
+    taskName: "task1__with_skill",
     rawRoot,
     targetRoot: finalRoot,
   });
   assert.equal(result.disposition, "created");
   assert.equal(
     result.targetTaskDir,
-    path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "transfer1__with_skill"),
+    path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "task1__with_skill"),
   );
   assert.equal(
     buildPublishedVariantTaskDir({
       targetRoot: finalRoot,
       templateId: template.templateId,
       scopeSlug: nodeConnectSkill.dirName,
-      taskName: "transfer1",
+      taskName: "task1",
       variant: "no_skill",
     }),
-    path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "transfer1__no_skill"),
+    path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "task1__no_skill"),
   );
 }
 
 {
   const finalRoot = path.join(fixtureRoot, "published-final");
-  const familyDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "transfer1__with_skill");
+  const familyDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "task1__with_skill");
   await ensureDir(path.join(familyDir, "tests"));
   await writeText(path.join(familyDir, "plan.json"), "{}\n");
   await writeText(path.join(familyDir, "instruction.md"), "x\n");
   await writeText(path.join(familyDir, "task.toml"), "x\n");
   await writeText(path.join(familyDir, "tests", "test_outputs.py"), "x\n");
-  const ignoredOldFamilyDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "similar1");
-  await ensureDir(path.join(ignoredOldFamilyDir, "tests"));
-  await writeText(path.join(ignoredOldFamilyDir, "plan.json"), "{}\n");
-  await writeText(path.join(ignoredOldFamilyDir, "instruction.md"), "x\n");
-  await writeText(path.join(ignoredOldFamilyDir, "task.toml"), "x\n");
-  await writeText(path.join(ignoredOldFamilyDir, "tests", "test_outputs.py"), "x\n");
+  for (const oldDirName of ["similar1__with_skill", "transfer1__with_skill"]) {
+    const ignoredOldFamilyDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, oldDirName);
+    await ensureDir(path.join(ignoredOldFamilyDir, "tests"));
+    await writeText(path.join(ignoredOldFamilyDir, "plan.json"), "{}\n");
+    await writeText(path.join(ignoredOldFamilyDir, "instruction.md"), "x\n");
+    await writeText(path.join(ignoredOldFamilyDir, "task.toml"), "x\n");
+    await writeText(path.join(ignoredOldFamilyDir, "tests", "test_outputs.py"), "x\n");
+  }
 
   const state = await inspectPublishedFamily(perSkillUnit, finalRoot);
   assert.equal(state.finalFamilyDir, path.join(finalRoot, template.templateId, nodeConnectSkill.dirName));
-  assert.deepEqual(state.pendingSimilarOrdinals, [1]);
-  assert.deepEqual(state.pendingTransferOrdinals, []);
+  assert.deepEqual(state.publishedTasks.map((publishedTask) => publishedTask.derivedTaskId), ["task1"]);
+  assert.deepEqual(state.pendingTaskOrdinals, [2]);
 
   const selected = selectExecutableUnits([
-    { ...perSkillUnit, pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
-    { ...perSkillUnit, scopeSlug: "queued", pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
-    { ...perSkillUnit, scopeSlug: "done", pendingSimilarOrdinals: [], pendingTransferOrdinals: [] },
+    { ...perSkillUnit, pendingTaskOrdinals: [1] },
+    { ...perSkillUnit, scopeSlug: "queued", pendingTaskOrdinals: [1] },
+    { ...perSkillUnit, scopeSlug: "done", pendingTaskOrdinals: [] },
   ]);
   assert.equal(selected.executableUnits.length, 2);
   assert.equal(selected.skippedCount, 1);
 
   const limitedSelected = selectExecutableUnits([
-    { ...perSkillUnit, pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
-    { ...perSkillUnit, scopeSlug: "queued", pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
-    { ...perSkillUnit, scopeSlug: "done", pendingSimilarOrdinals: [], pendingTransferOrdinals: [] },
+    { ...perSkillUnit, pendingTaskOrdinals: [1] },
+    { ...perSkillUnit, scopeSlug: "queued", pendingTaskOrdinals: [1] },
+    { ...perSkillUnit, scopeSlug: "done", pendingTaskOrdinals: [] },
   ], 1);
   assert.equal(limitedSelected.executableUnits.length, 1);
   assert.equal(limitedSelected.skippedCount, 2);
 
   const unlimitedSelected = selectExecutableUnits([
-    { ...perSkillUnit, pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
-    { ...perSkillUnit, scopeSlug: "queued", pendingSimilarOrdinals: [1], pendingTransferOrdinals: [] },
-    { ...perSkillUnit, scopeSlug: "done", pendingSimilarOrdinals: [], pendingTransferOrdinals: [] },
+    { ...perSkillUnit, pendingTaskOrdinals: [1] },
+    { ...perSkillUnit, scopeSlug: "queued", pendingTaskOrdinals: [1] },
+    { ...perSkillUnit, scopeSlug: "done", pendingTaskOrdinals: [] },
   ], 0);
   assert.equal(unlimitedSelected.executableUnits.length, 2);
   assert.equal(unlimitedSelected.skippedCount, 1);
+}
+
+{
+  const result = await runCommand("node", ["--import", "tsx", "src/cli.ts", "inventory", "--similar-count", "1"], {
+    cwd: process.cwd(),
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /改用 --task-count/);
 }
 
 {
@@ -488,7 +491,7 @@ gpus = 0
     true,
   );
   assert.equal(await pathExists(attemptOne.briefPath), true);
-  assert.match(await readText(attemptOne.briefPath), /当前 task: transfer1 \(Transfer 1\)/);
+  assert.match(await readText(attemptOne.briefPath), /当前 task: task1 \(Task 1\)/);
   assert.doesNotMatch(await readText(attemptOne.briefPath), /family 增量/);
 }
 

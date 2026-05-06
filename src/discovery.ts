@@ -22,8 +22,7 @@ export type SkillMode = "all" | "per-skill";
 
 export type PublishedTaskInfo = {
   derivedTaskId: string;
-  taskRole: "similar" | "transfer";
-  roleOrdinal: number;
+  taskOrdinal: number;
   taskDir: string;
   planPath: string;
   instructionPath: string;
@@ -53,10 +52,8 @@ export type GenerationUnit = {
   targetSkill: SkillInfo | null;
   scopeSlug: string;
   scopeLabel: string;
-  similarCount: number;
-  transferCount: number;
-  pendingSimilarOrdinals: number[];
-  pendingTransferOrdinals: number[];
+  taskCount: number;
+  pendingTaskOrdinals: number[];
   finalFamilyDir: string;
   publishedTasks: PublishedTaskInfo[];
 };
@@ -244,8 +241,7 @@ export function buildGenerationUnits(
   inputSkills: SkillInfo[],
   options: {
     skillMode: SkillMode;
-    similarCount: number;
-    transferCount: number;
+    taskCount: number;
   },
 ): GenerationUnit[] {
   if (inputSkills.length === 0) {
@@ -253,10 +249,8 @@ export function buildGenerationUnits(
   }
 
   const counts = {
-    similarCount: options.similarCount,
-    transferCount: options.transferCount,
-    pendingSimilarOrdinals: Array.from({ length: Math.max(0, options.similarCount) }, (_, index) => index + 1),
-    pendingTransferOrdinals: Array.from({ length: Math.max(0, options.transferCount) }, (_, index) => index + 1),
+    taskCount: options.taskCount,
+    pendingTaskOrdinals: Array.from({ length: Math.max(0, options.taskCount) }, (_, index) => index + 1),
     finalFamilyDir: "",
     publishedTasks: [] as PublishedTaskInfo[],
   };

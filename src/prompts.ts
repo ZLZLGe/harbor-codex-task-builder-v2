@@ -98,7 +98,7 @@ function renderTaskArtifactContracts(): string {
   return dedent(`
     关键文件契约:
     - solution/solve.sh 必须基于输入资产、任务规则和公开依赖生成可通过测试的结果，不得直接搬运任务内现成答案。
-    - solution/solve.sh、tests/test.sh、tests/test_outputs.py、instruction.md不能直接导入skill路径，原因是：假设agent要执行去掉skill后的任务时，做完以后通过test.sh去验收agent做的结果是否正确，如果有直接导入skill路径之类的话，那么由于dockerfile里面去掉skill了，就会出错。
+    - solution/solve.sh、tests/test.sh、tests/test_outputs.py、instruction.md不能直接导入skill路径，instruction.md 不能直接要求做题者要使用 input skills （即用来造任务的skill），原因是：假设agent要执行去掉skill后的任务时，做完以后通过test.sh去验收agent做的结果是否正确，如果有直接导入skill路径之类的话，那么由于dockerfile里面去掉skill了，就会出错。
     - tests/test_outputs.py 只能校验 instruction.md 已经说明或可直接推出的输出契约，并面向结果语义而不是未承诺的实现细节。
     - 如果在验证agent是否成功通过任务的时候，tests/test_outputs.py 不得依赖固定关键词、固定短语、固定同义词集合或唯一措辞，除非 instruction.md 明确说明要输出固定关键词、固定短语、固定同义词集合或唯一措辞。
     - 如果 tests/test_outputs.py 依赖instruction.md未承诺的实现细节，如内部函数名、唯一中间步骤或固定关键词，应视为 hidden requirement。
@@ -181,13 +181,13 @@ function renderDockerfileRules(): string {
   `);
 }
 
-export function buildRoleDisplayName(plan: Pick<DerivedTaskPlan, "taskRole" | "roleOrdinal">): string {
-  return `${plan.taskRole === "similar" ? "Similar" : "Transfer"} ${plan.roleOrdinal}`;
+export function buildTaskDisplayName(plan: Pick<DerivedTaskPlan, "taskOrdinal">): string {
+  return `Task ${plan.taskOrdinal}`;
 }
 
 export function buildTaskAttemptBrief(
   unit: GenerationUnit,
-  plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskRole" | "roleOrdinal">,
+  plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskOrdinal">,
   options: {
     attemptIndex: number;
     draftDirLabel?: string;
@@ -198,13 +198,13 @@ export function buildTaskAttemptBrief(
   const visibleSkills = getVisibleSkills(unit);
   const draftDirLabel = options.draftDirLabel ?? "draft/";
   const artifactsDirLabel = options.artifactsDirLabel ?? "artifacts/";
-  const roleDisplayName = buildRoleDisplayName(plan);
+  const taskDisplayName = buildTaskDisplayName(plan);
   return dedent(`
     # Codex Task Builder Brief
 
     你现在位于 Harbor task builder 的单题 attempt workspace 中。
 
-    当前 task: ${plan.derivedTaskId} (${roleDisplayName})
+    当前 task: ${plan.derivedTaskId} (${taskDisplayName})
     当前 attempt: attempt-${options.attemptIndex}
     当前 attempt 工作目录: task_attempts/${plan.derivedTaskId}/attempt-${options.attemptIndex}/
     当前唯一允许修改的任务目录: ${draftDirLabel}
@@ -255,12 +255,12 @@ export function buildTaskAttemptBrief(
 
 export function buildSingleTaskPlannerPrompt(
   unit: GenerationUnit,
-  plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskRole" | "roleOrdinal">,
+  plan: Pick<DerivedTaskPlan, "derivedTaskId" | "taskOrdinal">,
 ): string {
   const template = unit.template;
   const visibleSkills = getVisibleSkills(unit);
-  const roleDisplayName = buildRoleDisplayName(plan as DerivedTaskPlan);
-  const slotName = `${plan.taskRole}${plan.roleOrdinal}`;
+  const taskDisplayName = buildTaskDisplayName(plan);
+  const slotName = plan.derivedTaskId;
 
   return dedent(`
     先阅读 TASK_BUILDER_BRIEF.md，然后完整检查 template_source/ 和 input_skills/；如果 final-root 已有同 family 的已发布 *__with_skill 任务，也必须直接读取这些已发布任务目录。
@@ -270,9 +270,8 @@ export function buildSingleTaskPlannerPrompt(
 
     当前槽位:
     - derivedTaskId: ${plan.derivedTaskId}
-    - taskRole: ${plan.taskRole}
-    - roleOrdinal: ${plan.roleOrdinal}
-    - display name: ${roleDisplayName}
+    - taskOrdinal: ${plan.taskOrdinal}
+    - display name: ${taskDisplayName}
 
     模板摘要:
     - templateId: ${template.templateId}
@@ -307,7 +306,7 @@ export function buildSingleTaskPlannerPrompt(
     - skillBenefitRationale: 1.解释目标 skill 为什么与任务关键能力相关。2.解释为什么agent在执行任务的时候为什么有skill会比无skill更容易通过任务
     - difficulty: 难度。
     - category: 类别。
-    - derivedTaskId、taskRole、roleOrdinal、templateId、skillMode、targetSkillDirName、targetSkillName 由程序补齐，不属于 planner 输出。
+    - derivedTaskId、taskOrdinal、templateId、skillMode、targetSkillDirName、targetSkillName 由程序补齐，不属于 planner 输出。
     - 当前工作上下文只代表这个 task 的当前 attempt；历史 attempt 和其他未发布草稿都不是正式去重基准。
     - input_skills/ 才是最终 shipped skill 来源；不要把 template_source/environment/skills/ 误当成 shipped skills。
     - 如果 final-root 已有同 family 的已发布 *__with_skill 任务，必须先直接读取它们，并主动避免与这些历史任务在任务场景、输入资产、输出语义和测试判定方式上过于接近。
@@ -325,7 +324,7 @@ export function buildTaskWriterPrompt(
     draftDirLabel?: string;
   } = {},
 ): string {
-  const roleDisplayName = buildRoleDisplayName(plan);
+  const taskDisplayName = buildTaskDisplayName(plan);
   const draftDirLabel = options.draftDirLabel ?? "draft/";
   const skillConstraint =
     unit.skillMode === "per-skill"
@@ -366,7 +365,7 @@ export function buildTaskWriterPrompt(
     - 已发布 Harbor family 目录: ${unit.finalFamilyDir || "unknown"}
     - 已发布任务列表:
     ${unit.publishedTasks.length === 0 ? "- none" : unit.publishedTasks.map((task) => renderPublishedTaskEntry(task)).join("\n")}
-    - 你不能修改 blueprint 中已经固定的核心约束：derivedTaskId、taskRole、roleOrdinal、templateId、skillMode、targetSkillDirName、targetSkillName。
+    - 你不能修改 blueprint 中已经固定的核心约束：derivedTaskId、taskOrdinal、templateId、skillMode、targetSkillDirName、targetSkillName。
 
     已知约束:
     ${skillConstraint}
@@ -376,11 +375,11 @@ export function buildTaskWriterPrompt(
     ${renderTaskArtifactContracts()}
     ${renderVerifierDesignPrinciples()}
     - task.toml 中 metadata.id 必须等于 "${plan.derivedTaskId}"。
-    - task.toml 中 metadata.name 必须显式包含 "${roleDisplayName}"。
+    - task.toml 中 metadata.name 必须显式包含 "${taskDisplayName}"。
     - instruction.md 必须使用英文描述。
     - task.toml 中 metadata.name 和 metadata.description 必须使用英文描述。
     - task.toml 中 metadata.source_template_id 必须等于 "${plan.templateId}"。
-    - task.toml 中 metadata.task_role 必须等于 "${plan.taskRole}"。
+    - task.toml 中如保留 metadata.task_role，只能写成 "task"，不得再写 similar 或 transfer。
     - task.toml 的 [metadata] 至少必须包含:
       - id
       - name
@@ -391,7 +390,6 @@ export function buildTaskWriterPrompt(
       - category
       - tags
       - source_template_id
-      - task_role
     - task.toml 必须包含 [environment]，并固定写为:
       - cpus = 2
       - memory_mb = 2048
@@ -445,7 +443,7 @@ export function buildBlockingReviewerPrompt(
     - final-root 下同 family 已发布 *__with_skill 任务
 
     当前 task:
-    - ${plan.derivedTaskId} (${buildRoleDisplayName(plan)}) -> ${draftDirLabel}
+    - ${plan.derivedTaskId} (${buildTaskDisplayName(plan)}) -> ${draftDirLabel}
     - 当前只审这个 task 的当前 attempt；历史 attempt 和其他未发布草稿都不属于当前上下文。
 
     已发布 Harbor family 目录: ${unit.finalFamilyDir || "unknown"}
@@ -579,9 +577,9 @@ export function buildRepairPrompt(args: {
     - 优先最小化改动，只修当前列出的问题。
     - 必须保留 plan.json，不要删除。
     - instruction.md、task.toml 的 metadata.name、metadata.description 必须保持英文，不要写中文任务描述。
-    - 不要改变 task.toml 的 metadata.id、metadata.source_template_id、metadata.task_role 所代表的任务身份；如当前这些字段缺失或错误，可以把它们修正到与 plan.json 一致。
+    - 不要改变 task.toml 的 metadata.id、metadata.source_template_id 所代表的任务身份；如当前这些字段缺失或错误，可以把它们修正到与 plan.json 一致。metadata.task_role 如存在只能是 "task"。
     - 如果 task.toml 缺少 [environment].build_timeout_sec、[agent].timeout_sec 或 [verifier].timeout_sec，必须补齐；秒数根据 template_source/task.toml、当前任务复杂度和测试耗时合理设置，不要依赖 Harbor 默认值。
-    - 如果 blocking reviewer 指出当前 task 与已发布 *__with_skill sibling / 历史任务过近，优先通过修改 instruction、输入资产、输出契约或验收对象把它们拉开差异；不要改 task id 或 role。
+    - 如果 blocking reviewer 指出当前 task 与已发布 *__with_skill sibling / 历史任务过近，优先通过修改 instruction、输入资产、输出契约或验收对象把它们拉开差异；不要改 task id 或 taskOrdinal。
     - 不要修改 environment/skills/ 下 injected skill payload；如果需要调整 skill 使用方式，应通过题目本身、输入资产、tests 修正，而不是改 skill 内容。
     - 如果 solution/solve.sh 或 tests/** 直接调用 skill 模块，必须去耦：把最小必需逻辑搬到任务自身代码里；最终参考解与 verifier 在有 skill / 无 skill 两种评测设置都要能运行。
     - 不要引入隐藏测试要求；instruction、tests、solution 应保持一致。
