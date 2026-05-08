@@ -61,7 +61,7 @@ function renderTemplateReferenceRules(assetTargetDir: string): string {
     - template_source/ 是参考模板，不是让你机械复写的最终任务。
     - template_source/environment/skills/ 里的内容只作为模板上下文参考，不代表最终 shipped skills。
     - input_skills/ 才是本轮真正要注入最终任务的 shipped skills 来源。
-    - 你可以复用、裁剪、重命名 template_source/environment/ 中的输入资产，也可以在 ${assetTargetDir} 下新建全新的输入资产，输入资产需要包含执行任务所需的前置输入，不能包含Harbor任务格式下的solution和tests。
+    - 你可以复用、裁剪、重命名 template_source/environment/ 中的输入资产，也可以在 ${assetTargetDir} 下新建全新的输入资产；如果任务需要真实世界背景、数据、规则或样例，必须通过 web search 获取真实数据来源并体现在输入资产中。输入资产需要包含执行任务所需的前置输入，不能包含Harbor任务格式下的solution和tests。
     - 派生任务不要求保留模板任务的原始素材、文件名或目录结构；只要任务目标、验证方式合理即可。
   `);
 }
@@ -108,11 +108,10 @@ function renderTaskArtifactContracts(): string {
 function renderVerifierDesignPrinciples(): string {
   return dedent(`
     verifier(目标是验收agent是否成功通过任务) 设计原则:
-    - verifier 只能检查 instruction.md 已经说明、或可直接推出的要求；tests/solution 只能验证题目规则，不能补充题目规则。
-    - 与验收相关的输出路径、文件名、字段、格式、容忍误差和边界条件必须清晰且无歧义。
-    - verifier 应优先检查输出是否存在、格式是否正确、结果语义是否正确，以及相关系统状态是否被正确更新。
-    - 如果任务较复杂，tests 应拆成若干测试点，分别覆盖关键结果，而不是只保留一个含糊的统一测试点。
-    - verifier 不应依赖随机性、脆弱时序、未承诺的实现细节，或难以复现的外部状态。
+    - verifier 设计必须明确分为主测试和防作弊测试两部分。
+    - 主测试负责验证题目要求的核心输出、结果语义、状态变化和主要成功路径。
+    - 防作弊测试负责验证做题者没有通过篡改输入资产、直接搬运现成答案、绕过关键步骤、伪造输出或其他 shortcut 取巧过关。
+    - tests/test.sh 与 tests/test_outputs.py 的实现应让这两类检查边界清晰、职责明确，避免混成一个含糊的大一统测试。
   `);
 }
 
@@ -462,10 +461,11 @@ export function buildBlockingReviewerPrompt(
       - task.toml 是否显式包含 [environment].build_timeout_sec、[agent].timeout_sec、[verifier].timeout_sec；如果缺失任一 timeout 字段，直接判定为 blocking 问题
       - environment/ 如果直接提供了任务完整标准答案，直接判错
       - solution/solve.sh 如果不是根据输入资产进行解题，例如直接硬编码答案来强行通过任务，直接判错
-      - tests/test_outputs.py 是否只检查 instruction.md 中已说明、或可直接推出的输出契约，并面向结果语义而不是未承诺的实现细节；否则视为 hidden requirement
+      - verifier 是否明确分为主测试和防作弊测试；如果没有清晰区分这两部分，直接判定失败
+      - verifier 是否只检查 instruction.md 中已说明、或可直接推出的输出契约，并面向结果语义而不是未承诺的实现细节；否则视为 hidden requirement
       - 对自由文本主输出，tests/test_outputs.py 是否依赖固定关键词、固定短语、固定同义词集合或唯一措辞；除非 instruction.md 明确要输出固定关键词、固定短语、固定同义词集合或唯一措辞，否则直接视为 hidden requirement
-      - verifier 如果依赖 instruction.md 中都没有说明、也无法直接推出的规则，直接判错；如果 solution 在补充题目规则，说明题面存在隐藏要求，直接判定失败
-      - tests/test_outputs.py 的期望内容是否来自输入资产、题面，而不是现成答案文件
+      - 如果 solution 在补充题目规则，说明题面存在隐藏要求，直接判定失败
+      - 防作弊测试是否只拦截作弊路径，而不是额外增加题面未承诺的新要求；如果防作弊测试引入 hidden requirement，直接判定失败
       - solution/solve.sh、tests/test.sh、tests/test_outputs.py 是否直接引用 environment/skills/**、/root/.codex/skills/**、/app/skills/** 或其他 skill 安装路径/模块；只要存在这种硬依赖，就直接判定失败
       - solution/solve.sh、tests/test.sh、tests/test_outputs.py、environment/Dockerfile 的路径契约是否一致
       - 当前 task 是否与 final-root 下已发布 *__with_skill sibling / 历史任务在任务场景、输入资产、输出语义或测试判定方式上过于接近；如果过近，直接判定失败
@@ -583,6 +583,7 @@ export function buildRepairPrompt(args: {
     - 不要修改 environment/skills/ 下 injected skill payload；如果需要调整 skill 使用方式，应通过题目本身、输入资产、tests 修正，而不是改 skill 内容。
     - 如果 solution/solve.sh 或 tests/** 直接调用 skill 模块，必须去耦：把最小必需逻辑搬到任务自身代码里；最终参考解与 verifier 在有 skill / 无 skill 两种评测设置都要能运行。
     - 不要引入隐藏测试要求；instruction、tests、solution 应保持一致。
+    - verifier 必须继续保持主测试和防作弊测试两部分的清晰分工；修复时不要把它们重新混成一个难以解释的大测试。
     - 如果当前任务的主输出是自由文本，而 tests/test_outputs.py 依赖固定关键词、固定短语、固定同义词集合或唯一措辞，只有 instruction.md 已明确要输出固定关键词、固定短语、固定同义词集合或唯一措辞，才允许保留这种检查。
     - 如果需要修改 environment/Dockerfile，请继续满足下面这些 Dockerfile 契约：
     ${renderDockerfileRules()}
