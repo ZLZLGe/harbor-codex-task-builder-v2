@@ -196,6 +196,9 @@ assert.match(writerPrompt, /纯可执行工具可以放在 \/usr\/local\/bin/);
 assert.match(writerPrompt, /不得把 skills 复制到普通运行时路径/);
 assert.match(writerPrompt, /唯一允许语句是 COPY skills \/root\/\.codex\/skills/);
 assert.match(writerPrompt, /不要再添加任何把 skills\/ 或 \/root\/\.codex\/skills 复制、移动、同步、软链接到其他目录/);
+assert.match(writerPrompt, /instruction\.md 写作契约/);
+assert.match(writerPrompt, /不要明说“使用某个 skill”/);
+assert.match(writerPrompt, /Brief opening, Input data, Your task, Output, Notes/);
 assert.doesNotMatch(writerPrompt, /primaryOutputFile/);
 assert.doesNotMatch(writerPrompt, /primary_output_file/);
 assert.match(historyWriterPrompt, /已发布 Harbor family 目录/);
@@ -223,6 +226,7 @@ assert.match(repairPrompt, /非 skill 输入资产，应优先 COPY 到 WORKDIR 
 assert.match(repairPrompt, /唯一允许语句是 COPY skills \/root\/\.codex\/skills/);
 assert.match(repairPrompt, /with_skill_pass__no_skill_invalid_fail/);
 assert.match(repairPrompt, /已发布 \*__with_skill sibling \/ 历史任务过近/);
+assert.match(repairPrompt, /Brief opening, Input data, Your task, Output, Notes/);
 assert.doesNotMatch(repairPrompt, /family:/);
 assert.doesNotMatch(repairPrompt, /primaryOutputFile/);
 assert.doesNotMatch(repairPrompt, /primary_output_file/);

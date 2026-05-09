@@ -105,6 +105,18 @@ function renderTaskArtifactContracts(): string {
   `);
 }
 
+function renderInstructionWritingRules(): string {
+  return dedent(`
+    instruction.md 写作契约:
+    - instruction.md 必须使用英文，简洁、用户可读，不要写成教程、逐步解法或完整操作清单。
+    - 写题前先阅读目标 skill，理解它的适用场景、核心工作流和输出判断方式；任务设计应考验 solver 是否能自然识别并执行这种工作流，但 instruction.md 不要明说“使用某个 skill”。
+    - 题面只保留用户可见的交付合同：输入位置、输入资产含义、要完成的任务、输出文件、必要格式和边界条件。
+    - 弱化或移走本应由 skill 提供的诊断细节、推理步骤和专家判断框架。
+    - instruction.md 不得提及 verifier、tests、solution、task.toml、plan.json、/logs 或 skill 安装路径。
+    - 推荐结构: Brief opening, Input data, Your task, Output, Notes。
+  `);
+}
+
 function renderVerifierDesignPrinciples(): string {
   return dedent(`
     verifier(目标是验收agent是否成功通过任务) 设计原则:
@@ -372,6 +384,7 @@ export function buildTaskWriterPrompt(
     ${renderInputSkillRules(unit, { draftSkillDirLabel: `${draftDirLabel}environment/skills/` })}
     ${renderSkillEffectDesignRules(unit)}
     ${renderTaskArtifactContracts()}
+    ${renderInstructionWritingRules()}
     ${renderVerifierDesignPrinciples()}
     - task.toml 中 metadata.id 必须等于 "${plan.derivedTaskId}"。
     - task.toml 中 metadata.name 必须显式包含 "${taskDisplayName}"。
@@ -400,8 +413,7 @@ export function buildTaskWriterPrompt(
     - 必须保留 plan.json，不要删除或改名；如需更新，只能与当前 blueprint 保持一致。
     ${renderDockerfileRules()}
     - 不要把当前任务实现成比 blueprint 更轻的版本；尤其不要通过教程式 instruction、暴露关键步骤、放置一眼可见答案或单命令捷径，把它稀释成 easy/普通 medium 小题。
-    - instruction.md 只应清楚说明任务目标、输入资产、输出契约和边界条件，不要写成按顺序执行即可过关的操作手册。
-    - instruction.md 只能描述做题者在任务运行时可见的工作区、输入资产、输出文件和操作边界；instruction.md 和 environment目录下的输入资产不要提及例如 /solution、任务根的 tests/test.sh、任务根的 tests/test_outputs.py、task.toml、plan.json、/logs/verifier。
+    - instruction.md 和 environment 输入资产都不得暴露 solution/tests/task.toml/plan.json/logs 等任务内部实现细节。
     ${renderHarborOracleBaseline()}
 
     你需要创建或更新这些文件:
@@ -583,6 +595,7 @@ export function buildRepairPrompt(args: {
     - 不要修改 environment/skills/ 下 injected skill payload；如果需要调整 skill 使用方式，应通过题目本身、输入资产、tests 修正，而不是改 skill 内容。
     - 如果 solution/solve.sh 或 tests/** 直接调用 skill 模块，必须去耦：把最小必需逻辑搬到任务自身代码里；最终参考解与 verifier 在有 skill / 无 skill 两种评测设置都要能运行。
     - 不要引入隐藏测试要求；instruction、tests、solution 应保持一致。
+    - 修复 instruction.md 时必须保持简洁的用户题面结构：Brief opening, Input data, Your task, Output, Notes；不要改成教程式解法，也不要暴露 verifier/test/skill 安装细节。
     - verifier 必须继续保持主测试和防作弊测试两部分的清晰分工；修复时不要把它们重新混成一个难以解释的大测试。
     - 如果当前任务的主输出是自由文本，而 tests/test_outputs.py 依赖固定关键词、固定短语、固定同义词集合或唯一措辞，只有 instruction.md 已明确要输出固定关键词、固定短语、固定同义词集合或唯一措辞，才允许保留这种检查。
     - 如果需要修改 environment/Dockerfile，请继续满足下面这些 Dockerfile 契约：
