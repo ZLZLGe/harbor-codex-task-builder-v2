@@ -23,6 +23,7 @@ export type SkillMode = "all" | "per-skill";
 export type PublishedTaskInfo = {
   derivedTaskId: string;
   taskOrdinal: number;
+  acceptanceKind?: "pf_success" | "oracle_fallback_success";
   taskDir: string;
   planPath: string;
   instructionPath: string;

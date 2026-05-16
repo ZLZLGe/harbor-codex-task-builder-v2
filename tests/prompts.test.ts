@@ -112,6 +112,12 @@ const repairPrompt = buildRepairPrompt({
   staticIssues: ["static:task1 task.toml metadata.source_template_id is wrong"],
   runtimeIssues: ["runtime:task1 harbor verifier reward=0 < 1.0"],
   skillEffectIssues: ["skill-effect:task1 with_skill_pass__no_skill_invalid_fail"],
+  oracleFallbackIssues: ["oracle-fallback:task1 no_skill oracle fallback 未通过"],
+  runtimeLogRoot: "/tmp/artifacts/runtime/task1/cycle-0-attempt-1",
+  skillEffectEvidenceRoot: "/tmp/artifacts/skill_effect/task1/cycle-0-attempt-1",
+  skillEffectResultPath: "/tmp/artifacts/task1.skill-effect.cycle-0.attempt-1.json",
+  oracleFallbackEvidenceRoot: "/tmp/artifacts/oracle_fallback/task1/cycle-0-attempt-1",
+  oracleFallbackResultPath: "/tmp/artifacts/task1.oracle-fallback.cycle-0.attempt-1.json",
 });
 
 const allModeUnit = buildGenerationUnits(template, [debugSkill, sessionSkill], {
@@ -199,6 +205,12 @@ assert.match(writerPrompt, /不要再添加任何把 skills\/ 或 \/root\/\.code
 assert.match(writerPrompt, /instruction\.md 写作契约/);
 assert.match(writerPrompt, /不要明说“使用某个 skill”/);
 assert.match(writerPrompt, /Brief opening, Input data, Your task, Output, Notes/);
+assert.match(writerPrompt, /未修改的初始 environment 必须无法通过 verifier/);
+assert.match(writerPrompt, /solution\/solve\.sh 必须像真实 solver 一样/);
+assert.match(writerPrompt, /verifier 主测试只能断言 instruction\.md 明确写出的用户可见契约/);
+assert.match(writerPrompt, /防作弊测试只能检测硬编码、fixture 过拟合或 shortcut 行为/);
+assert.match(writerPrompt, /shipped skill payload、installed skill path 或内部 task package 细节/);
+assert.match(writerPrompt, /不得对已发布 sibling 任务做简单领域换皮/);
 assert.doesNotMatch(writerPrompt, /primaryOutputFile/);
 assert.doesNotMatch(writerPrompt, /primary_output_file/);
 assert.match(historyWriterPrompt, /已发布 Harbor family 目录/);
@@ -207,19 +219,33 @@ assert.match(historyWriterPrompt, /task1__with_skill/);
 assert.match(blockingReviewerPrompt, /单题 blocking 审查/);
 assert.match(blockingReviewerPrompt, /writer 不应改写 injected skill payload/);
 assert.match(blockingReviewerPrompt, /taskResults 中只返回当前这个任务/);
-assert.match(blockingReviewerPrompt, /已发布 \*__with_skill sibling \/ 历史任务/);
+assert.match(blockingReviewerPrompt, /历史任务去重主要由 planner\/writer 负责/);
+assert.match(blockingReviewerPrompt, /reviewer 不需要逐项复审已发布任务/);
+assert.match(blockingReviewerPrompt, /明显复制已发布 \*__with_skill 任务的场景、输入资产、输出契约和 verifier 策略/);
+assert.match(blockingReviewerPrompt, /未修改的初始 environment 如果可以通过 verifier/);
+assert.match(blockingReviewerPrompt, /solution\/solve\.sh 是否像真实 solver 一样/);
 assert.doesNotMatch(blockingReviewerPrompt, /builder_refs\/harbor/);
 assert.match(blockingReviewerPrompt, /当前 task:\s+- task1 \(Task 1\) -> draft\//);
 assert.match(blockingReviewerPrompt, /当前只审这个 task 的当前 attempt/);
 assert.doesNotMatch(blockingReviewerPrompt, /当前 family 规划:/);
-assert.match(historyBlockingReviewerPrompt, /已发布 Harbor family 目录/);
-assert.match(historyBlockingReviewerPrompt, /\*__with_skill sibling \/ 历史任务/);
+assert.match(historyBlockingReviewerPrompt, /历史任务去重主要由 planner\/writer 负责/);
+assert.doesNotMatch(historyBlockingReviewerPrompt, /已发布 tasks:/);
+assert.doesNotMatch(historyBlockingReviewerPrompt, /task1__with_skill/);
 
 assert.match(repairPrompt, /不要修改 template_source\/、input_skills\/、artifacts\//);
 assert.doesNotMatch(repairPrompt, /builder_refs\//);
 assert.match(repairPrompt, /不要修改 environment\/skills\/ 下 injected skill 的内容/);
 assert.match(repairPrompt, /family workspace 根目录、历史 attempt、Harbor 仓库代码/);
 assert.match(repairPrompt, /你还可以读取这些本 attempt 的运行证据/);
+assert.match(repairPrompt, /Oracle runtime evidence root: \/tmp\/artifacts\/runtime\/task1\/cycle-0-attempt-1/);
+assert.match(repairPrompt, /Skill-effect evidence root: \/tmp\/artifacts\/skill_effect\/task1\/cycle-0-attempt-1/);
+assert.match(repairPrompt, /skill-effect 总结 JSON: \/tmp\/artifacts\/task1\.skill-effect\.cycle-0\.attempt-1\.json/);
+assert.match(repairPrompt, /Oracle fallback evidence root: \/tmp\/artifacts\/oracle_fallback\/task1\/cycle-0-attempt-1/);
+assert.match(repairPrompt, /Oracle fallback summary JSON: \/tmp\/artifacts\/task1\.oracle-fallback\.cycle-0\.attempt-1\.json/);
+assert.doesNotMatch(repairPrompt, /with_skill 日志根目录/);
+assert.doesNotMatch(repairPrompt, /with_skill 结果 JSON/);
+assert.doesNotMatch(repairPrompt, /no_skill reward 文件/);
+assert.doesNotMatch(repairPrompt, /no_skill 结果 JSON/);
 assert.match(repairPrompt, /metadata\.source_template_id/);
 assert.match(repairPrompt, /blocking reviewer:/);
 assert.match(repairPrompt, /非 skill 输入资产，应优先 COPY 到 WORKDIR 或其子目录/);
@@ -227,6 +253,11 @@ assert.match(repairPrompt, /唯一允许语句是 COPY skills \/root\/\.codex\/s
 assert.match(repairPrompt, /with_skill_pass__no_skill_invalid_fail/);
 assert.match(repairPrompt, /已发布 \*__with_skill sibling \/ 历史任务过近/);
 assert.match(repairPrompt, /Brief opening, Input data, Your task, Output, Notes/);
+assert.match(repairPrompt, /不要为了保留过窄测试而把 hidden requirement 硬塞进 instruction\.md/);
+assert.match(repairPrompt, /修复 solution\/solve\.sh 时，必须像真实 solver 一样/);
+assert.match(repairPrompt, /未修改的初始 workspace 必须仍然不能通过 verifier/);
+assert.match(repairPrompt, /修复 verifier 主测试时，只能断言 instruction\.md 明确写出的用户可见契约/);
+assert.match(repairPrompt, /修复防作弊测试时，只能检测硬编码、fixture 过拟合或 shortcut 行为/);
 assert.doesNotMatch(repairPrompt, /family:/);
 assert.doesNotMatch(repairPrompt, /primaryOutputFile/);
 assert.doesNotMatch(repairPrompt, /primary_output_file/);

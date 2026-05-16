@@ -11,18 +11,25 @@ import {
   type SkillMode,
 } from "./discovery.js";
 import { appendManifest, writeRunSummary, type ManifestEntry } from "./manifest.js";
-import { buildPublishedVariantTaskDir, sanitizeAndCopyTask } from "./materialize.js";
+import {
+  buildAcceptanceFinalRoot,
+  buildPublishedVariantTaskDir,
+  sanitizeAndCopyTask,
+  type AcceptanceKind,
+} from "./materialize.js";
 import { applyPublishedFamilyState, inspectPublishedFamily, selectExecutableUnits } from "./published.js";
 import type { DerivedTaskPlan, SingleTaskPlan, WriterSummary } from "./schema.js";
 import {
-  buildSkillEffectBucketRoot,
   buildSkillEffectIssues,
+  prepareNoSkillVariant,
+  prepareWithSkillVariant,
   runSkillEffectEvaluation,
   runSkillEffectPreflight,
   type SkillEffectBucket,
   type SkillEffectEvaluationResult,
 } from "./skill_effect.js";
 import { writeSkillEffectResultArtifact } from "./skill_effect_artifacts.js";
+import { archiveTracePairs, type TraceArchivePair } from "./trace_archive.js";
 import {
   DEFAULT_OUTPUT_ROOT,
   TEMPLATE_ROOT,
@@ -42,6 +49,7 @@ import {
 } from "./workspace.js";
 import {
   resolveRuntimeEnvironment,
+  oracleFallbackIssue,
   runRuntimePreflight,
   runRuntimeValidation,
   validateBlockingReviewResult,
@@ -49,6 +57,7 @@ import {
   validateTaskPlans,
   type RuntimeEnvironment,
   type RuntimeEvidence,
+  type RuntimeValidationResult,
   type ValidationIssue,
 } from "./validate.js";
 
@@ -69,10 +78,9 @@ type FamilyExecutionResult = {
   failedTaskIds: string[];
   publishedVariantDirs: Array<{
     derivedTaskId: string;
+    acceptanceKind: AcceptanceKind;
     withSkillDir: string;
     noSkillDir: string | null;
-    bucketWithSkillDir: string | null;
-    bucketNoSkillDir: string | null;
   }>;
   failedTaskRefs: Array<{
     derivedTaskId: string;
@@ -100,6 +108,23 @@ type FamilyExecutionResult = {
   workspace?: FamilyWorkspace;
 };
 
+type RepairStage = "pre_runtime" | "runtime" | "skill_effect" | "oracle_fallback";
+
+type OracleFallbackVariantResult = {
+  variant: "with_skill" | "no_skill";
+  variantTaskDir: string;
+  runtime: RuntimeValidationResult;
+};
+
+type OracleFallbackEvaluationResult = {
+  pairRoot: string;
+  attemptIndex: number;
+  repairRequired: boolean;
+  withSkill: OracleFallbackVariantResult;
+  noSkill: OracleFallbackVariantResult;
+  issues: ValidationIssue[];
+};
+
 type TaskCycleState = {
   attemptWorkspace: TaskAttemptWorkspace;
   attemptIndex: number;
@@ -108,17 +133,27 @@ type TaskCycleState = {
   writerSummary?: WriterSummary;
   repairThreadId: string | null;
   repairRoundsUsed: number;
+  preRuntimeRepairRoundsUsed: number;
+  runtimeRepairRoundsUsed: number;
+  skillEffectRepairRoundsUsed: number;
+  oracleFallbackRepairRoundsUsed: number;
   runtimeAttemptCount: number;
   skillEffectAttemptCount: number;
+  oracleFallbackAttemptCount: number;
   blockingIssues: ValidationIssue[];
   staticIssues: ValidationIssue[];
   runtimeIssues: ValidationIssue[];
   skillEffectIssues: ValidationIssue[];
+  oracleFallbackIssues: ValidationIssue[];
   runtimeEvidence?: RuntimeEvidence;
   skillEffectEvaluation?: SkillEffectEvaluationResult;
+  oracleFallbackEvaluation?: OracleFallbackEvaluationResult;
   skillEffectResultPath?: string;
+  oracleFallbackResultPath?: string;
   acceptedWithSkillVariantDir?: string;
   acceptedNoSkillVariantDir?: string;
+  acceptanceKind?: AcceptanceKind;
+  tracePairs: TraceArchivePair[];
   passed: boolean;
 };
 
@@ -127,7 +162,10 @@ type ExecuteFamilyOptions = {
   rawRoot: string;
   finalRoot: string;
   runtimeEnvironment: RuntimeEnvironment;
-  maxRepairRounds: number;
+  maxPreRuntimeRepairRounds: number;
+  maxRuntimeRepairRounds: number;
+  maxSkillEffectRepairRounds: number;
+  maxOracleFallbackRepairRounds: number;
   codexRunRetries: number;
   taskAttemptTimeoutHours: number;
   maxTaskRestarts: number;
@@ -243,6 +281,49 @@ function recordSkillEffectBucketCount(
   bucket: SkillEffectBucket,
 ): void {
   counts[bucket] = (counts[bucket] ?? 0) + 1;
+}
+
+function getRepairRoundsUsed(taskState: TaskCycleState, stage: RepairStage): number {
+  if (stage === "pre_runtime") {
+    return taskState.preRuntimeRepairRoundsUsed;
+  }
+  if (stage === "runtime") {
+    return taskState.runtimeRepairRoundsUsed;
+  }
+  if (stage === "skill_effect") {
+    return taskState.skillEffectRepairRoundsUsed;
+  }
+  return taskState.oracleFallbackRepairRoundsUsed;
+}
+
+function getRepairRoundBudget(options: ExecuteFamilyOptions, stage: RepairStage): number {
+  if (stage === "pre_runtime") {
+    return options.maxPreRuntimeRepairRounds;
+  }
+  if (stage === "runtime") {
+    return options.maxRuntimeRepairRounds;
+  }
+  if (stage === "skill_effect") {
+    return options.maxSkillEffectRepairRounds;
+  }
+  return options.maxOracleFallbackRepairRounds;
+}
+
+function canRepair(taskState: TaskCycleState, options: ExecuteFamilyOptions, stage: RepairStage): boolean {
+  return getRepairRoundsUsed(taskState, stage) < getRepairRoundBudget(options, stage);
+}
+
+function incrementRepairRounds(taskState: TaskCycleState, stage: RepairStage): void {
+  taskState.repairRoundsUsed += 1;
+  if (stage === "pre_runtime") {
+    taskState.preRuntimeRepairRoundsUsed += 1;
+  } else if (stage === "runtime") {
+    taskState.runtimeRepairRoundsUsed += 1;
+  } else if (stage === "skill_effect") {
+    taskState.skillEffectRepairRoundsUsed += 1;
+  } else {
+    taskState.oracleFallbackRepairRoundsUsed += 1;
+  }
 }
 
 function buildOrdinalRange(count: number): number[] {
@@ -372,10 +453,11 @@ async function withAttemptDeadline<T>(
   }
 }
 
-function buildPublishedTaskInfo(plan: DerivedTaskPlan, taskDir: string): PublishedTaskInfo {
+function buildPublishedTaskInfo(plan: DerivedTaskPlan, taskDir: string, acceptanceKind: AcceptanceKind): PublishedTaskInfo {
   return {
     derivedTaskId: plan.derivedTaskId,
     taskOrdinal: plan.taskOrdinal,
+    acceptanceKind,
     taskDir,
     planPath: path.join(taskDir, "plan.json"),
     instructionPath: path.join(taskDir, "instruction.md"),
@@ -427,6 +509,7 @@ async function repairTaskDraft(
   workspace: TaskAttemptWorkspace,
   taskState: TaskCycleState,
   cycle: number,
+  repairStage: RepairStage,
   outputRoot: string,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -439,6 +522,7 @@ async function repairTaskDraft(
     staticIssues: issueMessages(taskState.staticIssues),
     runtimeIssues: issueMessages(taskState.runtimeIssues),
     skillEffectIssues: issueMessages(taskState.skillEffectIssues),
+    oracleFallbackIssues: issueMessages(taskState.oracleFallbackIssues),
     runtimeDir: taskState.runtimeEvidence?.runtimeDir,
     runtimeLogRoot: taskState.runtimeEvidence?.runtimeLogRoot,
     runtimeLogIndexPath: taskState.runtimeEvidence?.runtimeLogIndexPath,
@@ -449,23 +533,19 @@ async function repairTaskDraft(
     verifierStdoutPath: taskState.runtimeEvidence?.verifierStdoutPath,
     rewardPath: taskState.runtimeEvidence?.rewardPath,
     artifactManifestPath: taskState.runtimeEvidence?.artifactManifestPath,
+    skillEffectEvidenceRoot: taskState.skillEffectEvaluation?.pairRoot,
     skillEffectResultPath: taskState.skillEffectResultPath,
     skillEffectBucket: taskState.skillEffectEvaluation?.bucket,
-    withSkillLogRoot: taskState.skillEffectEvaluation?.withSkill.evidence.logsDir,
-    withSkillResultPath: taskState.skillEffectEvaluation?.withSkill.evidence.resultPath,
-    withSkillRewardPath: taskState.skillEffectEvaluation?.withSkill.evidence.rewardPath,
-    withSkillTrajectoryPath: taskState.skillEffectEvaluation?.withSkill.evidence.trajectoryPath,
-    noSkillLogRoot: taskState.skillEffectEvaluation?.noSkill.evidence.logsDir,
-    noSkillResultPath: taskState.skillEffectEvaluation?.noSkill.evidence.resultPath,
-    noSkillRewardPath: taskState.skillEffectEvaluation?.noSkill.evidence.rewardPath,
-    noSkillTrajectoryPath: taskState.skillEffectEvaluation?.noSkill.evidence.trajectoryPath,
+    oracleFallbackEvidenceRoot: taskState.oracleFallbackEvaluation?.pairRoot,
+    oracleFallbackResultPath: taskState.oracleFallbackResultPath,
     threadId: taskState.repairThreadId,
     signal,
   });
   taskState.repairThreadId = repairResult.threadId;
-  taskState.repairRoundsUsed += 1;
+  incrementRepairRounds(taskState, repairStage);
   taskState.acceptedWithSkillVariantDir = undefined;
   taskState.acceptedNoSkillVariantDir = undefined;
+  taskState.acceptanceKind = undefined;
   taskState.passed = false;
   await writeJson(
     path.join(workspace.artifactsDir, `${taskState.plan.derivedTaskId}.repair.${taskState.repairRoundsUsed}.json`),
@@ -492,14 +572,184 @@ async function repairTaskDraft(
         ...issueMessages(taskState.staticIssues),
         ...issueMessages(taskState.runtimeIssues),
         ...issueMessages(taskState.skillEffectIssues),
+        ...issueMessages(taskState.oracleFallbackIssues),
       ],
       metadata: {
         cycle,
         attemptIndex: taskState.attemptIndex,
+        repairStage,
       },
     },
     outputRoot,
   );
+}
+
+function buildSkillEffectTracePair(args: {
+  unit: GenerationUnit;
+  runId: string;
+  plan: DerivedTaskPlan;
+  attemptIndex: number;
+  cycle: number;
+  stageAttemptIndex: number;
+  evaluation: SkillEffectEvaluationResult;
+}): TraceArchivePair {
+  return {
+    runId: args.runId,
+    templateId: args.unit.template.templateId,
+    scopeSlug: args.unit.scopeSlug,
+    derivedTaskId: args.plan.derivedTaskId,
+    attemptIndex: args.attemptIndex,
+    cycle: args.cycle,
+    stage: "skill-effect",
+    stageAttemptIndex: args.stageAttemptIndex,
+    pairRoot: args.evaluation.pairRoot,
+    bucket: args.evaluation.bucket,
+    withSkill: {
+      status: args.evaluation.withSkill.comparisonStatus,
+      passed: args.evaluation.withSkill.passed,
+      reward: args.evaluation.withSkill.evidence.reward ?? null,
+      resultPath: args.evaluation.withSkill.evidence.resultPath,
+      trajectoryPath: args.evaluation.withSkill.evidence.trajectoryPath,
+      variantTaskDir: args.evaluation.withSkill.evidence.variantTaskDir,
+      summary: args.evaluation.withSkill.evidence.summary,
+    },
+    noSkill: {
+      status: args.evaluation.noSkill.comparisonStatus,
+      passed: args.evaluation.noSkill.passed,
+      reward: args.evaluation.noSkill.evidence.reward ?? null,
+      resultPath: args.evaluation.noSkill.evidence.resultPath,
+      trajectoryPath: args.evaluation.noSkill.evidence.trajectoryPath,
+      variantTaskDir: args.evaluation.noSkill.evidence.variantTaskDir,
+      summary: args.evaluation.noSkill.evidence.summary,
+    },
+  };
+}
+
+function buildOracleFallbackTracePair(args: {
+  unit: GenerationUnit;
+  runId: string;
+  plan: DerivedTaskPlan;
+  attemptIndex: number;
+  cycle: number;
+  evaluation: OracleFallbackEvaluationResult;
+}): TraceArchivePair {
+  return {
+    runId: args.runId,
+    templateId: args.unit.template.templateId,
+    scopeSlug: args.unit.scopeSlug,
+    derivedTaskId: args.plan.derivedTaskId,
+    attemptIndex: args.attemptIndex,
+    cycle: args.cycle,
+    stage: "oracle-fallback",
+    stageAttemptIndex: args.evaluation.attemptIndex,
+    pairRoot: args.evaluation.pairRoot,
+    withSkill: {
+      status: args.evaluation.withSkill.runtime.passed ? "pass" : "fail",
+      passed: args.evaluation.withSkill.runtime.passed,
+      reward: args.evaluation.withSkill.runtime.evidence.reward ?? null,
+      resultPath: args.evaluation.withSkill.runtime.evidence.resultPath,
+      variantTaskDir: args.evaluation.withSkill.variantTaskDir,
+      summary: args.evaluation.withSkill.runtime.evidence.summary,
+    },
+    noSkill: {
+      status: args.evaluation.noSkill.runtime.passed ? "pass" : "fail",
+      passed: args.evaluation.noSkill.runtime.passed,
+      reward: args.evaluation.noSkill.runtime.evidence.reward ?? null,
+      resultPath: args.evaluation.noSkill.runtime.evidence.resultPath,
+      variantTaskDir: args.evaluation.noSkill.variantTaskDir,
+      summary: args.evaluation.noSkill.runtime.evidence.summary,
+    },
+  };
+}
+
+function buildOracleFallbackIssues(
+  taskId: string,
+  withSkillResult: RuntimeValidationResult,
+  noSkillResult: RuntimeValidationResult,
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (!withSkillResult.passed) {
+    issues.push(oracleFallbackIssue(taskId, `with_skill oracle fallback 未通过: ${issueMessages(withSkillResult.issues).join("; ")}`));
+  }
+  if (!noSkillResult.passed) {
+    issues.push(oracleFallbackIssue(taskId, `no_skill oracle fallback 未通过: ${issueMessages(noSkillResult.issues).join("; ")}`));
+  }
+  return issues;
+}
+
+async function runOracleFallbackEvaluation(args: {
+  workspace: TaskAttemptWorkspace;
+  plan: DerivedTaskPlan;
+  runtimeEnvironment: RuntimeEnvironment;
+  cycle: number;
+  attemptIndex: number;
+  draftTaskDir: string;
+  signal?: AbortSignal;
+}): Promise<OracleFallbackEvaluationResult> {
+  const pairRoot = path.join(
+    args.workspace.artifactsDir,
+    "oracle_fallback",
+    args.plan.derivedTaskId,
+    `cycle-${args.cycle}-attempt-${args.attemptIndex}`,
+  );
+  const withSkillTaskDir = path.join(pairRoot, "variants", "with_skill");
+  const noSkillTaskDir = path.join(pairRoot, "variants", "no_skill");
+  await prepareWithSkillVariant({
+    sourceTaskDir: args.draftTaskDir,
+    targetTaskDir: withSkillTaskDir,
+  });
+  await prepareNoSkillVariant({
+    sourceTaskDir: withSkillTaskDir,
+    targetTaskDir: noSkillTaskDir,
+  });
+
+  const [withSkillRuntime, noSkillRuntime] = await Promise.all([
+    runRuntimeValidation(
+      args.workspace,
+      args.plan,
+      args.runtimeEnvironment,
+      args.cycle,
+      args.attemptIndex,
+      withSkillTaskDir,
+      process.env,
+      args.signal,
+      {
+        logsDir: path.join(pairRoot, "with_skill"),
+        jobNamePrefix: "harbor-oracle-fallback-with-skill",
+      },
+    ),
+    runRuntimeValidation(
+      args.workspace,
+      args.plan,
+      args.runtimeEnvironment,
+      args.cycle,
+      args.attemptIndex,
+      noSkillTaskDir,
+      process.env,
+      args.signal,
+      {
+        logsDir: path.join(pairRoot, "no_skill"),
+        jobNamePrefix: "harbor-oracle-fallback-no-skill",
+      },
+    ),
+  ]);
+  const issues = buildOracleFallbackIssues(args.plan.derivedTaskId, withSkillRuntime, noSkillRuntime);
+  return {
+    pairRoot,
+    attemptIndex: args.attemptIndex,
+    repairRequired: issues.length > 0,
+    withSkill: {
+      variant: "with_skill",
+      variantTaskDir: withSkillTaskDir,
+      runtime: withSkillRuntime,
+    },
+    noSkill: {
+      variant: "no_skill",
+      variantTaskDir: noSkillTaskDir,
+      runtime: noSkillRuntime,
+    },
+    issues,
+  };
 }
 
 async function executeTaskAttempt(
@@ -607,18 +857,28 @@ async function executeTaskAttempt(
       writerSummary: writerResult.data,
       repairThreadId: null,
       repairRoundsUsed: 0,
+      preRuntimeRepairRoundsUsed: 0,
+      runtimeRepairRoundsUsed: 0,
+      skillEffectRepairRoundsUsed: 0,
+      oracleFallbackRepairRoundsUsed: 0,
       runtimeAttemptCount: 0,
       skillEffectAttemptCount: 0,
+      oracleFallbackAttemptCount: 0,
       blockingIssues: [],
       staticIssues: [],
       runtimeIssues: [],
       skillEffectIssues: [],
+      oracleFallbackIssues: [],
       acceptedWithSkillVariantDir: undefined,
       acceptedNoSkillVariantDir: undefined,
+      acceptanceKind: undefined,
+      tracePairs: [],
       passed: false,
     };
 
-    for (let cycle = 0; cycle <= options.maxRepairRounds; cycle += 1) {
+    let fallbackMode = !options.skillEffectEnabled;
+    while (true) {
+      const cycle = taskState.repairRoundsUsed;
       const reviewResult = await withAttemptDeadline(plan.derivedTaskId, attemptIndex, "review", deadlineAt, (signal) =>
         codex.reviewTaskBlocking(taskUnit, attemptWorkspace, plan, {
           signal,
@@ -642,11 +902,15 @@ async function executeTaskAttempt(
       taskState.staticIssues = await validateDraftStatic(taskState.draftDir, plan, taskUnit);
       taskState.runtimeIssues = [];
       taskState.skillEffectIssues = [];
+      taskState.oracleFallbackIssues = [];
       taskState.runtimeEvidence = undefined;
       taskState.skillEffectEvaluation = undefined;
+      taskState.oracleFallbackEvaluation = undefined;
       taskState.skillEffectResultPath = undefined;
+      taskState.oracleFallbackResultPath = undefined;
       taskState.acceptedWithSkillVariantDir = undefined;
       taskState.acceptedNoSkillVariantDir = undefined;
+      taskState.acceptanceKind = undefined;
       taskState.passed = false;
 
       const preRuntimeIssues = [...taskState.blockingIssues, ...taskState.staticIssues];
@@ -669,9 +933,9 @@ async function executeTaskAttempt(
       );
 
       if (preRuntimeIssues.length > 0) {
-        if (taskState.repairRoundsUsed < options.maxRepairRounds) {
+        if (canRepair(taskState, options, "pre_runtime")) {
           await withAttemptDeadline(plan.derivedTaskId, attemptIndex, "repair", deadlineAt, (signal) =>
-            repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, options.outputRoot, signal),
+            repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, "pre_runtime", options.outputRoot, signal),
           );
           continue;
         }
@@ -741,9 +1005,9 @@ async function executeTaskAttempt(
           options.outputRoot,
         );
 
-        if (taskState.repairRoundsUsed < options.maxRepairRounds) {
+        if (canRepair(taskState, options, "runtime")) {
           await withAttemptDeadline(plan.derivedTaskId, attemptIndex, "repair", deadlineAt, (signal) =>
-            repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, options.outputRoot, signal),
+            repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, "runtime", options.outputRoot, signal),
           );
           continue;
         }
@@ -755,75 +1019,156 @@ async function executeTaskAttempt(
         };
       }
 
-      if (!options.skillEffectEnabled) {
-        taskState.acceptedWithSkillVariantDir = taskState.draftDir;
-        taskState.acceptedNoSkillVariantDir = undefined;
-        taskState.passed = true;
-        return {
-          status: "published",
-          taskState,
-          attemptWorkspace,
-          issues: [],
-        };
+      if (!fallbackMode) {
+        const skillEffectAttemptIndex = taskState.skillEffectAttemptCount + 1;
+        const skillEffectResult = await withAttemptDeadline(
+          plan.derivedTaskId,
+          attemptIndex,
+          "skill-effect",
+          deadlineAt,
+          (signal) =>
+            runSkillEffectEvaluation({
+              workspace: attemptWorkspace,
+              plan,
+              runtimeEnvironment: options.runtimeEnvironment,
+              cycle,
+              attemptIndex: skillEffectAttemptIndex,
+              draftTaskDir: taskState.draftDir,
+              modelName: options.skillEffectModel,
+              apiKey: options.skillEffectApiKey,
+              baseUrl: options.skillEffectBaseUrl,
+              signal,
+            }),
+        );
+        taskState.skillEffectAttemptCount = skillEffectAttemptIndex;
+        taskState.skillEffectEvaluation = skillEffectResult;
+        taskState.skillEffectIssues = buildSkillEffectIssues(plan.derivedTaskId, skillEffectResult);
+        taskState.tracePairs.push(
+          buildSkillEffectTracePair({
+            unit,
+            runId: familyWorkspace.runId,
+            plan,
+            attemptIndex,
+            cycle,
+            stageAttemptIndex: skillEffectAttemptIndex,
+            evaluation: skillEffectResult,
+          }),
+        );
+        taskState.acceptedWithSkillVariantDir = skillEffectResult.repairRequired
+          ? undefined
+          : skillEffectResult.withSkill.evidence.variantTaskDir;
+        taskState.acceptedNoSkillVariantDir = skillEffectResult.repairRequired
+          ? undefined
+          : skillEffectResult.noSkill.evidence.variantTaskDir;
+        taskState.skillEffectResultPath = await writeSkillEffectResultArtifact({
+          artifactsDir: attemptWorkspace.artifactsDir,
+          derivedTaskId: plan.derivedTaskId,
+          cycle,
+          attemptIndex: skillEffectAttemptIndex,
+          result: skillEffectResult,
+        });
+        await appendManifest(
+          {
+            runId: familyWorkspace.runId,
+            templateId: unit.template.templateId,
+            derivedTaskId: plan.derivedTaskId,
+            phase: "skill-effect",
+            status: skillEffectResult.repairRequired ? "failed" : "completed",
+            draftDir: taskState.draftDir,
+            issues: issueMessages(taskState.skillEffectIssues),
+            metadata: {
+              ...buildScopeMetadata(taskUnit, options.runtimeEnvironment),
+              attemptIndex,
+              cycle,
+              skillEffectAttempt: skillEffectAttemptIndex,
+              skillEffectBucket: skillEffectResult.bucket,
+            },
+          },
+          options.outputRoot,
+        );
+
+        if (!skillEffectResult.repairRequired) {
+          taskState.acceptanceKind = "pf_success";
+          taskState.passed = true;
+          return {
+            status: "published",
+            taskState,
+            attemptWorkspace,
+            issues: [],
+          };
+        }
+
+        if (canRepair(taskState, options, "skill_effect")) {
+          await withAttemptDeadline(plan.derivedTaskId, attemptIndex, "repair", deadlineAt, (signal) =>
+            repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, "skill_effect", options.outputRoot, signal),
+          );
+          continue;
+        }
+
+        fallbackMode = true;
       }
 
-      const skillEffectAttemptIndex = taskState.skillEffectAttemptCount + 1;
-      const skillEffectResult = await withAttemptDeadline(
+      const oracleFallbackAttemptIndex = taskState.oracleFallbackAttemptCount + 1;
+      const oracleFallbackResult = await withAttemptDeadline(
         plan.derivedTaskId,
         attemptIndex,
-        "skill-effect",
+        "oracle-fallback",
         deadlineAt,
         (signal) =>
-          runSkillEffectEvaluation({
+          runOracleFallbackEvaluation({
             workspace: attemptWorkspace,
             plan,
             runtimeEnvironment: options.runtimeEnvironment,
             cycle,
-            attemptIndex: skillEffectAttemptIndex,
+            attemptIndex: oracleFallbackAttemptIndex,
             draftTaskDir: taskState.draftDir,
-            modelName: options.skillEffectModel,
-            apiKey: options.skillEffectApiKey,
-            baseUrl: options.skillEffectBaseUrl,
             signal,
           }),
       );
-      taskState.skillEffectAttemptCount = skillEffectAttemptIndex;
-      taskState.skillEffectEvaluation = skillEffectResult;
-      taskState.skillEffectIssues = buildSkillEffectIssues(plan.derivedTaskId, skillEffectResult);
-      taskState.acceptedWithSkillVariantDir = skillEffectResult.repairRequired
-        ? undefined
-        : skillEffectResult.withSkill.evidence.variantTaskDir;
-      taskState.acceptedNoSkillVariantDir = skillEffectResult.repairRequired
-        ? undefined
-        : skillEffectResult.noSkill.evidence.variantTaskDir;
-      taskState.skillEffectResultPath = await writeSkillEffectResultArtifact({
-        artifactsDir: attemptWorkspace.artifactsDir,
-        derivedTaskId: plan.derivedTaskId,
-        cycle,
-        attemptIndex: skillEffectAttemptIndex,
-        result: skillEffectResult,
-      });
+      taskState.oracleFallbackAttemptCount = oracleFallbackAttemptIndex;
+      taskState.oracleFallbackEvaluation = oracleFallbackResult;
+      taskState.oracleFallbackIssues = oracleFallbackResult.issues;
+      taskState.tracePairs.push(
+        buildOracleFallbackTracePair({
+          unit,
+          runId: familyWorkspace.runId,
+          plan,
+          attemptIndex,
+          cycle,
+          evaluation: oracleFallbackResult,
+        }),
+      );
+      const oracleFallbackResultPath = path.join(
+        attemptWorkspace.artifactsDir,
+        `${plan.derivedTaskId}.oracle-fallback.cycle-${cycle}.attempt-${oracleFallbackAttemptIndex}.json`,
+      );
+      await writeJson(oracleFallbackResultPath, oracleFallbackResult);
+      taskState.oracleFallbackResultPath = oracleFallbackResultPath;
       await appendManifest(
         {
           runId: familyWorkspace.runId,
           templateId: unit.template.templateId,
           derivedTaskId: plan.derivedTaskId,
-          phase: "skill-effect",
-          status: skillEffectResult.repairRequired ? "failed" : "completed",
+          phase: "oracle-fallback",
+          status: oracleFallbackResult.repairRequired ? "failed" : "completed",
           draftDir: taskState.draftDir,
-          issues: issueMessages(taskState.skillEffectIssues),
+          issues: issueMessages(taskState.oracleFallbackIssues),
           metadata: {
             ...buildScopeMetadata(taskUnit, options.runtimeEnvironment),
             attemptIndex,
             cycle,
-            skillEffectAttempt: skillEffectAttemptIndex,
-            skillEffectBucket: skillEffectResult.bucket,
+            oracleFallbackAttempt: oracleFallbackAttemptIndex,
+            withSkillResultPath: oracleFallbackResult.withSkill.runtime.evidence.resultPath,
+            noSkillResultPath: oracleFallbackResult.noSkill.runtime.evidence.resultPath,
           },
         },
         options.outputRoot,
       );
 
-      if (!skillEffectResult.repairRequired) {
+      if (!oracleFallbackResult.repairRequired) {
+        taskState.acceptedWithSkillVariantDir = oracleFallbackResult.withSkill.variantTaskDir;
+        taskState.acceptedNoSkillVariantDir = oracleFallbackResult.noSkill.variantTaskDir;
+        taskState.acceptanceKind = "oracle_fallback_success";
         taskState.passed = true;
         return {
           status: "published",
@@ -833,9 +1178,9 @@ async function executeTaskAttempt(
         };
       }
 
-      if (taskState.repairRoundsUsed < options.maxRepairRounds) {
+      if (canRepair(taskState, options, "oracle_fallback")) {
         await withAttemptDeadline(plan.derivedTaskId, attemptIndex, "repair", deadlineAt, (signal) =>
-          repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, options.outputRoot, signal),
+          repairTaskDraft(codex, taskUnit, attemptWorkspace, taskState, cycle, "oracle_fallback", options.outputRoot, signal),
         );
         continue;
       }
@@ -844,7 +1189,7 @@ async function executeTaskAttempt(
         status: "exhausted_repairs",
         taskState,
         attemptWorkspace,
-        issues: issueMessages(taskState.skillEffectIssues),
+        issues: issueMessages(taskState.oracleFallbackIssues),
       };
     }
 
@@ -852,9 +1197,7 @@ async function executeTaskAttempt(
       status: "exhausted_repairs",
       taskState,
       attemptWorkspace,
-      issues: [
-        `${slot.derivedTaskId} attempt-${attemptIndex} 在未通过的情况下耗尽了 max-repair-rounds=${options.maxRepairRounds}`,
-      ],
+      issues: [`${slot.derivedTaskId} attempt-${attemptIndex} 在未通过的情况下耗尽了分阶段 repair 预算`],
     };
   } catch (error) {
     if (error instanceof TaskAttemptTimeoutError) {
@@ -903,12 +1246,16 @@ async function executeFamilyGeneration(
       let finalAttemptState: TaskCycleState | undefined;
       let finalAttemptWorkspace: TaskAttemptWorkspace | undefined;
       let finalAttemptIssues: string[] = [];
+      const taskTracePairs: TraceArchivePair[] = [];
 
       for (let attemptIndex = 1; attemptIndex <= options.maxTaskRestarts + 1; attemptIndex += 1) {
         const attemptResult = await executeTaskAttempt(codex, unit, workspace, slot, attemptIndex, options);
         finalAttemptState = attemptResult.taskState;
         finalAttemptWorkspace = attemptResult.attemptWorkspace;
         finalAttemptIssues = attemptResult.issues;
+        if (attemptResult.taskState) {
+          taskTracePairs.push(...attemptResult.taskState.tracePairs);
+        }
 
         await appendRunManifest({
           runId: workspace.runId,
@@ -928,9 +1275,17 @@ async function executeFamilyGeneration(
         if (attemptResult.status === "published") {
           const taskState = attemptResult.taskState;
           const plan = taskState.plan;
+          if (!taskState.acceptanceKind) {
+            throw new Error(`${plan.derivedTaskId} published attempt 缺少 acceptanceKind`);
+          }
+          if (!taskState.acceptedNoSkillVariantDir) {
+            throw new Error(`${plan.derivedTaskId} published attempt 缺少 no_skill 变体`);
+          }
+          const acceptanceKind = taskState.acceptanceKind;
+          const acceptanceFinalRoot = buildAcceptanceFinalRoot(options.finalRoot, acceptanceKind);
           const withSkillSourceDir = taskState.acceptedWithSkillVariantDir ?? taskState.draftDir;
           const withSkillTargetDir = buildPublishedVariantTaskDir({
-            targetRoot: options.finalRoot,
+            targetRoot: acceptanceFinalRoot,
             templateId: unit.template.templateId,
             scopeSlug: unit.scopeSlug,
             taskName: plan.derivedTaskId,
@@ -942,35 +1297,31 @@ async function executeFamilyGeneration(
             scopeSlug: unit.scopeSlug,
             taskName: `${plan.derivedTaskId}__with_skill`,
             rawRoot: options.rawRoot,
-            targetRoot: options.finalRoot,
+            targetRoot: acceptanceFinalRoot,
           });
-          let noSkillTargetDir: string | null = null;
-          if (taskState.acceptedNoSkillVariantDir) {
-            noSkillTargetDir = buildPublishedVariantTaskDir({
-              targetRoot: options.finalRoot,
-              templateId: unit.template.templateId,
-              scopeSlug: unit.scopeSlug,
-              taskName: plan.derivedTaskId,
-              variant: "no_skill",
-            });
-            await sanitizeAndCopyTask({
-              sourceDraftDir: taskState.acceptedNoSkillVariantDir,
-              templateId: unit.template.templateId,
-              scopeSlug: unit.scopeSlug,
-              taskName: `${plan.derivedTaskId}__no_skill`,
-              rawRoot: options.rawRoot,
-              targetRoot: options.finalRoot,
-            });
-          }
+          const noSkillTargetDir = buildPublishedVariantTaskDir({
+            targetRoot: acceptanceFinalRoot,
+            templateId: unit.template.templateId,
+            scopeSlug: unit.scopeSlug,
+            taskName: plan.derivedTaskId,
+            variant: "no_skill",
+          });
+          await sanitizeAndCopyTask({
+            sourceDraftDir: taskState.acceptedNoSkillVariantDir,
+            templateId: unit.template.templateId,
+            scopeSlug: unit.scopeSlug,
+            taskName: `${plan.derivedTaskId}__no_skill`,
+            rawRoot: options.rawRoot,
+            targetRoot: acceptanceFinalRoot,
+          });
           publishedTaskIds.push(plan.derivedTaskId);
           publishedVariantDirs.push({
             derivedTaskId: plan.derivedTaskId,
+            acceptanceKind,
             withSkillDir: withSkillTargetDir,
             noSkillDir: noSkillTargetDir,
-            bucketWithSkillDir: null,
-            bucketNoSkillDir: null,
           });
-          upsertPublishedTask(unit, buildPublishedTaskInfo(plan, withSkillResult.targetTaskDir));
+          upsertPublishedTask(unit, buildPublishedTaskInfo(plan, withSkillResult.targetTaskDir, acceptanceKind));
           removePendingSlot(unit, slot);
           await appendRunManifest({
             runId: workspace.runId,
@@ -983,71 +1334,18 @@ async function executeFamilyGeneration(
             metadata: {
               ...buildScopeMetadata(buildSingleTaskUnit(unit, slot), options.runtimeEnvironment),
               attemptIndex: taskState.attemptIndex,
+              acceptanceKind,
               publishDisposition: withSkillResult.disposition,
               publishedNoSkillDir: noSkillTargetDir,
               withSkillVariantSourceDir: withSkillSourceDir,
               noSkillVariantSourceDir: taskState.acceptedNoSkillVariantDir,
             },
           });
-
-          if (taskState.skillEffectEvaluation) {
-            const bucketRoot = buildSkillEffectBucketRoot(options.finalRoot, taskState.skillEffectEvaluation.bucket);
-            const bucketWithSkillDir = buildPublishedVariantTaskDir({
-              targetRoot: bucketRoot,
-              templateId: unit.template.templateId,
-              scopeSlug: unit.scopeSlug,
-              taskName: plan.derivedTaskId,
-              variant: "with_skill",
-            });
-            const bucketWithSkillResult = await sanitizeAndCopyTask({
-              sourceDraftDir: withSkillSourceDir,
-              templateId: unit.template.templateId,
-              scopeSlug: unit.scopeSlug,
-              taskName: `${plan.derivedTaskId}__with_skill`,
-              rawRoot: options.rawRoot,
-              targetRoot: bucketRoot,
-            });
-            let bucketNoSkillDir: string | null = null;
-            if (taskState.acceptedNoSkillVariantDir) {
-              bucketNoSkillDir = buildPublishedVariantTaskDir({
-                targetRoot: bucketRoot,
-                templateId: unit.template.templateId,
-                scopeSlug: unit.scopeSlug,
-                taskName: plan.derivedTaskId,
-                variant: "no_skill",
-              });
-              await sanitizeAndCopyTask({
-                sourceDraftDir: taskState.acceptedNoSkillVariantDir,
-                templateId: unit.template.templateId,
-                scopeSlug: unit.scopeSlug,
-                taskName: `${plan.derivedTaskId}__no_skill`,
-                rawRoot: options.rawRoot,
-                targetRoot: bucketRoot,
-              });
-            }
-            publishedVariantDirs[publishedVariantDirs.length - 1] = {
-              ...publishedVariantDirs[publishedVariantDirs.length - 1]!,
-              bucketWithSkillDir,
-              bucketNoSkillDir,
-            };
-            await appendRunManifest({
-              runId: workspace.runId,
-              templateId: unit.template.templateId,
-              derivedTaskId: plan.derivedTaskId,
-              phase: "skill-effect-bucket",
-              status: "completed",
-              draftDir: taskState.draftDir,
-              publishedDir: bucketWithSkillResult.targetTaskDir,
-              metadata: {
-                ...buildScopeMetadata(buildSingleTaskUnit(unit, slot), options.runtimeEnvironment),
-                attemptIndex: taskState.attemptIndex,
-                skillEffectBucket: taskState.skillEffectEvaluation.bucket,
-                publishDisposition: bucketWithSkillResult.disposition,
-                bucketTarget: "final",
-                publishedNoSkillDir: bucketNoSkillDir,
-              },
-            });
-          }
+          await archiveTracePairs({
+            outputRoot: options.outputRoot,
+            outcome: acceptanceKind,
+            pairs: taskTracePairs,
+          });
           break;
         }
 
@@ -1063,6 +1361,11 @@ async function executeFamilyGeneration(
             finalAttemptState,
           ),
         );
+        await archiveTracePairs({
+          outputRoot: options.outputRoot,
+          outcome: "failed",
+          pairs: taskTracePairs,
+        });
         finalIssues.push(...finalAttemptIssues);
         await appendRunManifest({
           runId: workspace.runId,
@@ -1210,6 +1513,11 @@ function assertNoLegacyOptions(options: Options): void {
   if (options["similar-count"] !== undefined || options["transfer-count"] !== undefined) {
     throw new Error("similar-count 和 transfer-count 已移除，请改用 --task-count");
   }
+  if (options["max-repair-rounds"] !== undefined) {
+    throw new Error(
+      "max-repair-rounds 已拆分，请改用 --max-pre-runtime-repair-rounds、--max-runtime-repair-rounds、--max-skill-effect-repair-rounds、--max-oracle-fallback-repair-rounds",
+    );
+  }
 
   const legacyKeys = [
     "source-root",
@@ -1284,6 +1592,9 @@ async function ensureRoots(options: ExecuteFamilyOptions): Promise<void> {
   await ensureDir(options.outputRoot);
   await ensureDir(options.rawRoot);
   await ensureDir(options.finalRoot);
+  await ensureDir(buildAcceptanceFinalRoot(options.finalRoot, "pf_success"));
+  await ensureDir(buildAcceptanceFinalRoot(options.finalRoot, "oracle_fallback_success"));
+  await ensureDir(path.join(options.outputRoot, "trace_archive"));
 }
 
 async function main(): Promise<void> {
@@ -1317,7 +1628,10 @@ async function main(): Promise<void> {
     rawRoot: buildRawRoot(outputRoot),
     finalRoot: buildFinalRoot(outputRoot),
     runtimeEnvironment,
-    maxRepairRounds: getNumberOption(options, "max-repair-rounds", 2),
+    maxPreRuntimeRepairRounds: getNonNegativeIntegerOption(options, "max-pre-runtime-repair-rounds", 12),
+    maxRuntimeRepairRounds: getNonNegativeIntegerOption(options, "max-runtime-repair-rounds", 5),
+    maxSkillEffectRepairRounds: getNonNegativeIntegerOption(options, "max-skill-effect-repair-rounds", 6),
+    maxOracleFallbackRepairRounds: getNonNegativeIntegerOption(options, "max-oracle-fallback-repair-rounds", 2),
     codexRunRetries: getNonNegativeIntegerOption(options, "codex-run-retries", 3),
     taskAttemptTimeoutHours: parseNonNegativeNumber(
       getStringOption(options, "task-attempt-timeout-hours"),

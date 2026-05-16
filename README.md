@@ -77,7 +77,10 @@ npm run generate-family -- \
   --codex-run-retries 3 \
   --task-attempt-timeout-hours 2 \
   --max-task-restarts 1 \
-  --max-repair-rounds 2
+  --max-pre-runtime-repair-rounds 12 \
+  --max-runtime-repair-rounds 5 \
+  --max-skill-effect-repair-rounds 6 \
+  --max-oracle-fallback-repair-rounds 2
 ```
 
 关键参数：
@@ -109,14 +112,20 @@ npm run generate-family -- \
   - 可选，控制单题在首版 attempt 失败后最多再 fresh restart 几次
   - 默认值是 `1`
   - fresh restart 会进入全新的 attempt workspace，不会复用旧草稿
-- `--max-repair-rounds`
+- `--max-pre-runtime-repair-rounds`
+  - reviewer + static validate 阶段最多修复次数，默认 `12`
+- `--max-runtime-repair-rounds`
+  - Harbor Oracle runtime 阶段最多修复次数，默认 `5`
+- `--max-skill-effect-repair-rounds`
+  - with_skill / no_skill agent 对照阶段最多修复次数，默认 `6`
+- `--max-oracle-fallback-repair-rounds`
+  - skill-effect 预算耗尽后 oracle fallback 阶段最多修复次数，默认 `2`
 - `--limit`
   - 可选，按 unit 限制本次实际执行数量
   - 程序会先发现 units、读取 published state、筛出 executable units，再最多执行前 N 个；`0` 或未传表示不额外限制
 - `--skip-skill-effect-gate`
   - 可选，关闭真实 with-skill / no-skill 对照
-  - 关闭后，任务只要通过 reviewer / static / Oracle runtime，就会直接发布 `__with_skill`
-  - 这条路径不会生成 `__no_skill`，也不会写入 `_skill_effect_buckets/`
+  - 关闭后会走 oracle fallback，双版本 oracle 都通过才发布到 `oracle_fallback_success`
 - `--skill-effect-model`
   - 可选，指定 skill-effect 阶段 Harbor Codex trial 使用的模型
 
@@ -134,13 +143,14 @@ npm run generate-family -- \
     <run-id>/<template-id>/<scope>/
       task_attempts/<task-id>/attempt-<n>/...
   final/
-    <template-id>/<scope>/<task-name>__with_skill
-    # 默认 gate 开启且达到 PF 时，才会额外发布 __no_skill
-    <template-id>/<scope>/<task-name>__no_skill
-    _skill_effect_buckets/
-      # 只有默认 gate 开启且达到 PF 时才会写入 bucket 镜像
-      with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
-      with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
+    pf_success/<template-id>/<scope>/<task-name>__with_skill
+    pf_success/<template-id>/<scope>/<task-name>__no_skill
+    oracle_fallback_success/<template-id>/<scope>/<task-name>__with_skill
+    oracle_fallback_success/<template-id>/<scope>/<task-name>__no_skill
+  trace_archive/
+    pf_success/<template-id>/<scope>/<task-name>/pair-run-.../
+    oracle_fallback_success/<template-id>/<scope>/<task-name>/pair-run-.../
+    failed/<template-id>/<scope>/<task-name>/pair-run-.../
 ```
 
 例如：
@@ -148,20 +158,18 @@ npm run generate-family -- \
 ```text
 /Users/leviviya/Documents/Harbor/.local-workspace/codex_task_builder_v2_debugging/
 raw/20260410.../tools__debugging/01__node-connect/...
-final/tools__debugging/01__node-connect/task1__with_skill
-final/tools__debugging/01__node-connect/task1__no_skill
-final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__node-connect/task1__with_skill
-final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__node-connect/task1__no_skill
+final/pf_success/tools__debugging/01__node-connect/task1__with_skill
+final/pf_success/tools__debugging/01__node-connect/task1__no_skill
+trace_archive/pf_success/tools__debugging/01__node-connect/task1/pair-run-.../with_skill/result.json
 ```
 
 补充语义：
 
-- `final/` 只保留真正接受的 PF 任务。
-- `__with_skill` 是正式发布体，也是历史去重、重复运行复用、pending slot 判断唯一参考。
-- `__no_skill` 是对照副本，会随 PF 一起发布，但不会参与历史任务扫描。
-- 显式 `--skip-skill-effect-gate` 时，只会发布 `__with_skill`，不会生成 `__no_skill` 或 bucket 镜像。
+- `final/pf_success` 只保留真正达到 `with_skill pass / no_skill valid_reward_fail` 的任务。
+- `final/oracle_fallback_success` 保留 skill-effect 未达成 PF、但双版本 oracle 通过的兜底任务。
+- 新 pipeline 只扫描 `pf_success` 和 `oracle_fallback_success` 判断 pending slot。
 - 非 PF 任务不再 materialize 到单独目录，只保留在 `raw/`、`manifest.jsonl` 和 `<run-id>.json` 中。
-- 旧布局 `final/<template-id>/<scope>/<task-name>` 不兼容；当前代码只识别 `*__with_skill`。上线前需要手动清理或迁移旧 `final/`。
+- 旧 direct final `final/<template-id>/<scope>/<task-name>__with_skill` 原样保留，但新 pipeline 不迁移、不删除、不识别。
 
 ## Workspace 语义
 
@@ -197,9 +205,9 @@ final/_skill_effect_buckets/with_skill_pass__no_skill_fail/tools__debugging/01__
   - 去重范围只包含 `final-root` 下已经发布的 `*__with_skill` sibling / 历史任务
 - 一旦某个 task 达到 `PF`
   - 即 `with_skill` 通过，且 `no_skill` 满足“结果文件正常、无 exception、reward < 1”的 `with_skill_pass__no_skill_fail`
-  - 会立即 materialize 到 `<output-root>/final/.../<task>__with_skill` 和 `<output-root>/final/.../<task>__no_skill`
-  - 同时镜像到 `<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/...`
+  - 会立即 materialize 到 `<output-root>/final/pf_success/.../<task>__with_skill` 和 `<output-root>/final/pf_success/.../<task>__no_skill`
   - 后续 task 可以读取这个刚发布的 sibling，但不会重新打开它
+- 如果 skill-effect 修复预算耗尽，会进入 oracle fallback；双版本 oracle 都通过时发布到 `<output-root>/final/oracle_fallback_success/...`
 - 一个 family 允许部分成功
   - 已经通过的 task 会保留在 `final/`
   - 后续失败的 task 只保留在 `raw/` 和 run summary / manifest 里，不再进入 `quarantine/`

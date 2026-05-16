@@ -16,7 +16,7 @@ import {
 } from "./utils.js";
 
 export type ValidationIssue = {
-  scope: "family" | "reviewer" | "static" | "runtime" | "skill-effect";
+  scope: "family" | "reviewer" | "static" | "runtime" | "skill-effect" | "oracle-fallback";
   message: string;
   taskId?: string;
 };
@@ -228,6 +228,14 @@ function pushTaskIssue(
 function runtimeIssue(taskId: string, message: string): ValidationIssue {
   return {
     scope: "runtime",
+    taskId,
+    message,
+  };
+}
+
+export function oracleFallbackIssue(taskId: string, message: string): ValidationIssue {
+  return {
+    scope: "oracle-fallback",
     taskId,
     message,
   };
@@ -1186,12 +1194,17 @@ export async function runRuntimeValidation(
   draftTaskDir: string,
   env: NodeJS.ProcessEnv = process.env,
   signal?: AbortSignal,
+  options: {
+    logsDir?: string;
+    jobNamePrefix?: string;
+  } = {},
 ): Promise<RuntimeValidationResult> {
   const taskRuntimeRoot = path.join(workspace.artifactsDir, "runtime", plan.derivedTaskId);
-  const logsDir = path.join(taskRuntimeRoot, `cycle-${cycle}-attempt-${attemptIndex}`);
+  const logsDir = options.logsDir ?? path.join(taskRuntimeRoot, `cycle-${cycle}-attempt-${attemptIndex}`);
   const logFilePath = path.join(logsDir, "harbor-run.log");
   const runtimeLogIndexPath = path.join(logsDir, "log-index.json");
-  const jobName = `harbor-oracle-${slugify(workspace.runId)}-${slugify(plan.derivedTaskId)}-cycle-${cycle}-attempt-${attemptIndex}`;
+  const jobNamePrefix = options.jobNamePrefix ?? "harbor-oracle";
+  const jobName = `${jobNamePrefix}-${slugify(workspace.runId)}-${slugify(plan.derivedTaskId)}-cycle-${cycle}-attempt-${attemptIndex}`;
   const command = buildHarborRuntimeCommand({
     taskDir: draftTaskDir,
     logsDir,

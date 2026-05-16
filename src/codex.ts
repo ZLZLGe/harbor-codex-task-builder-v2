@@ -602,6 +602,7 @@ export class CodexTaskBuilderClient {
     staticIssues: string[];
     runtimeIssues: string[];
     skillEffectIssues: string[];
+    oracleFallbackIssues: string[];
     runtimeDir?: string;
     runtimeLogRoot?: string;
     runtimeLogIndexPath?: string;
@@ -612,16 +613,11 @@ export class CodexTaskBuilderClient {
     verifierStdoutPath?: string;
     rewardPath?: string;
     artifactManifestPath?: string;
+    skillEffectEvidenceRoot?: string;
     skillEffectResultPath?: string;
     skillEffectBucket?: string;
-    withSkillLogRoot?: string;
-    withSkillResultPath?: string;
-    withSkillRewardPath?: string;
-    withSkillTrajectoryPath?: string;
-    noSkillLogRoot?: string;
-    noSkillResultPath?: string;
-    noSkillRewardPath?: string;
-    noSkillTrajectoryPath?: string;
+    oracleFallbackEvidenceRoot?: string;
+    oracleFallbackResultPath?: string;
     threadId?: string | null;
     signal?: AbortSignal;
   }): Promise<StructuredRunResult<RepairTurnResult>> {
@@ -638,6 +634,7 @@ export class CodexTaskBuilderClient {
             staticIssues: args.staticIssues,
             runtimeIssues: args.runtimeIssues,
             skillEffectIssues: args.skillEffectIssues,
+            oracleFallbackIssues: args.oracleFallbackIssues,
             runtimeDir: args.runtimeDir,
             runtimeLogRoot: args.runtimeLogRoot,
             runtimeLogIndexPath: args.runtimeLogIndexPath,
@@ -648,16 +645,11 @@ export class CodexTaskBuilderClient {
             verifierStdoutPath: args.verifierStdoutPath,
             rewardPath: args.rewardPath,
             artifactManifestPath: args.artifactManifestPath,
+            skillEffectEvidenceRoot: args.skillEffectEvidenceRoot,
             skillEffectResultPath: args.skillEffectResultPath,
             skillEffectBucket: args.skillEffectBucket,
-            withSkillLogRoot: args.withSkillLogRoot,
-            withSkillResultPath: args.withSkillResultPath,
-            withSkillRewardPath: args.withSkillRewardPath,
-            withSkillTrajectoryPath: args.withSkillTrajectoryPath,
-            noSkillLogRoot: args.noSkillLogRoot,
-            noSkillResultPath: args.noSkillResultPath,
-            noSkillRewardPath: args.noSkillRewardPath,
-            noSkillTrajectoryPath: args.noSkillTrajectoryPath,
+            oracleFallbackEvidenceRoot: args.oracleFallbackEvidenceRoot,
+            oracleFallbackResultPath: args.oracleFallbackResultPath,
           }),
           {
             outputSchema: repairTurnResultJsonSchema,

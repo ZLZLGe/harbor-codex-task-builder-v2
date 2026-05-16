@@ -9,7 +9,7 @@ import {
   buildRunSummaryPath,
   writeRunSummary,
 } from "../src/manifest.js";
-import { buildPublishedVariantTaskDir, sanitizeAndCopyTask } from "../src/materialize.js";
+import { buildAcceptanceFinalRoot, buildPublishedVariantTaskDir, sanitizeAndCopyTask } from "../src/materialize.js";
 import { inspectPublishedFamily, selectExecutableUnits } from "../src/published.js";
 import {
   type BlockingReviewResult,
@@ -17,13 +17,13 @@ import {
 } from "../src/schema.js";
 import {
   buildSkillEffectBucket,
-  buildSkillEffectBucketRoot,
   isAcceptedSkillEffectBucket,
   isRepairRequiredSkillEffectBucket,
   prepareNoSkillVariant,
   prepareWithSkillVariant,
   stripSkillCopyLines,
 } from "../src/skill_effect.js";
+import { archiveTracePairs } from "../src/trace_archive.js";
 import {
   buildFinalRoot,
   buildRawRoot,
@@ -382,12 +382,12 @@ gpus = 0
 
 {
   const finalRoot = path.join(fixtureRoot, "published-final");
-  const familyDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "task1__with_skill");
-  await ensureDir(path.join(familyDir, "tests"));
-  await writeText(path.join(familyDir, "plan.json"), "{}\n");
-  await writeText(path.join(familyDir, "instruction.md"), "x\n");
-  await writeText(path.join(familyDir, "task.toml"), "x\n");
-  await writeText(path.join(familyDir, "tests", "test_outputs.py"), "x\n");
+  const ignoredDirectFinalDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, "task1__with_skill");
+  await ensureDir(path.join(ignoredDirectFinalDir, "tests"));
+  await writeText(path.join(ignoredDirectFinalDir, "plan.json"), "{}\n");
+  await writeText(path.join(ignoredDirectFinalDir, "instruction.md"), "x\n");
+  await writeText(path.join(ignoredDirectFinalDir, "task.toml"), "x\n");
+  await writeText(path.join(ignoredDirectFinalDir, "tests", "test_outputs.py"), "x\n");
   for (const oldDirName of ["similar1__with_skill", "transfer1__with_skill"]) {
     const ignoredOldFamilyDir = path.join(finalRoot, template.templateId, nodeConnectSkill.dirName, oldDirName);
     await ensureDir(path.join(ignoredOldFamilyDir, "tests"));
@@ -396,11 +396,34 @@ gpus = 0
     await writeText(path.join(ignoredOldFamilyDir, "task.toml"), "x\n");
     await writeText(path.join(ignoredOldFamilyDir, "tests", "test_outputs.py"), "x\n");
   }
+  for (const [acceptanceKind, taskName] of [
+    ["pf_success", "task1__with_skill"],
+    ["oracle_fallback_success", "task2__with_skill"],
+  ] as const) {
+    const publishedDir = path.join(
+      buildAcceptanceFinalRoot(finalRoot, acceptanceKind),
+      template.templateId,
+      nodeConnectSkill.dirName,
+      taskName,
+    );
+    await ensureDir(path.join(publishedDir, "tests"));
+    await writeText(path.join(publishedDir, "plan.json"), "{}\n");
+    await writeText(path.join(publishedDir, "instruction.md"), "x\n");
+    await writeText(path.join(publishedDir, "task.toml"), "x\n");
+    await writeText(path.join(publishedDir, "tests", "test_outputs.py"), "x\n");
+  }
 
   const state = await inspectPublishedFamily(perSkillUnit, finalRoot);
-  assert.equal(state.finalFamilyDir, path.join(finalRoot, template.templateId, nodeConnectSkill.dirName));
-  assert.deepEqual(state.publishedTasks.map((publishedTask) => publishedTask.derivedTaskId), ["task1"]);
-  assert.deepEqual(state.pendingTaskOrdinals, [2]);
+  assert.equal(
+    state.finalFamilyDir,
+    path.join(buildAcceptanceFinalRoot(finalRoot, "pf_success"), template.templateId, nodeConnectSkill.dirName),
+  );
+  assert.deepEqual(state.publishedTasks.map((publishedTask) => publishedTask.derivedTaskId), ["task1", "task2"]);
+  assert.deepEqual(state.publishedTasks.map((publishedTask) => publishedTask.acceptanceKind), [
+    "pf_success",
+    "oracle_fallback_success",
+  ]);
+  assert.deepEqual(state.pendingTaskOrdinals, []);
 
   const selected = selectExecutableUnits([
     { ...perSkillUnit, pendingTaskOrdinals: [1] },
@@ -433,6 +456,12 @@ gpus = 0
   });
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /改用 --task-count/);
+
+  const repairResult = await runCommand("node", ["--import", "tsx", "src/cli.ts", "inventory", "--max-repair-rounds", "1"], {
+    cwd: process.cwd(),
+  });
+  assert.notEqual(repairResult.code, 0);
+  assert.match(repairResult.stderr, /max-repair-rounds 已拆分/);
 }
 
 {
@@ -449,9 +478,71 @@ gpus = 0
   assert.equal(isRepairRequiredSkillEffectBucket("with_skill_pass__no_skill_invalid_fail"), true);
   assert.equal(isRepairRequiredSkillEffectBucket("with_skill_fail__no_skill_pass"), true);
   assert.equal(
-    buildSkillEffectBucketRoot("/tmp/output/final", "with_skill_pass__no_skill_fail"),
-    "/tmp/output/final/_skill_effect_buckets/with_skill_pass__no_skill_fail",
+    buildAcceptanceFinalRoot("/tmp/output/final", "pf_success"),
+    "/tmp/output/final/pf_success",
   );
+}
+
+{
+  const outputRoot = path.join(fixtureRoot, "trace-archive-output");
+  const sourceRoot = path.join(fixtureRoot, "trace-source");
+  const withSkillResult = path.join(sourceRoot, "with_skill", "result.json");
+  const withSkillTrajectory = path.join(sourceRoot, "with_skill", "trajectory.json");
+  const noSkillResult = path.join(sourceRoot, "no_skill", "result.json");
+  await writeText(withSkillResult, '{"agent_result":{"n_input_tokens":10},"started_at":"s","finished_at":"f"}\n');
+  await writeText(withSkillTrajectory, '{"events":[]}\n');
+  await writeText(noSkillResult, '{"verifier_result":{"rewards":{"reward":0}}}\n');
+  await writeText(path.join(sourceRoot, "with_skill", "reward.txt"), "1\n");
+
+  await archiveTracePairs({
+    outputRoot,
+    outcome: "pf_success",
+    pairs: [
+      {
+        runId: "run-one",
+        templateId: template.templateId,
+        scopeSlug: nodeConnectSkill.dirName,
+        derivedTaskId: "task1",
+        attemptIndex: 2,
+        cycle: 3,
+        stage: "skill-effect",
+        stageAttemptIndex: 4,
+        pairRoot: sourceRoot,
+        bucket: "with_skill_pass__no_skill_fail",
+        withSkill: {
+          status: "pass",
+          passed: true,
+          reward: 1,
+          resultPath: withSkillResult,
+          trajectoryPath: withSkillTrajectory,
+        },
+        noSkill: {
+          status: "valid_reward_fail",
+          passed: false,
+          reward: 0,
+          resultPath: noSkillResult,
+        },
+      },
+    ],
+  });
+
+  const archivedPairDir = path.join(
+    outputRoot,
+    "trace_archive",
+    "pf_success",
+    template.templateId,
+    nodeConnectSkill.dirName,
+    "task1",
+    "pair-run-run-one__attempt-2__cycle-3__skill-effect-4",
+  );
+  assert.equal(await pathExists(path.join(archivedPairDir, "with_skill", "result.json")), true);
+  assert.equal(await pathExists(path.join(archivedPairDir, "with_skill", "trajectory.json")), true);
+  assert.equal(await pathExists(path.join(archivedPairDir, "no_skill", "result.json")), true);
+  assert.equal(await pathExists(path.join(archivedPairDir, "with_skill", "reward.txt")), false);
+  const pairResult = JSON.parse(await readText(path.join(archivedPairDir, "pair_result.json"))) as {
+    withSkill: { sourceResultPath: string };
+  };
+  assert.equal(pairResult.withSkill.sourceResultPath, withSkillResult);
 }
 
 {

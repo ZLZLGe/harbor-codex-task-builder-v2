@@ -621,9 +621,6 @@ export function buildSkillEffectIssues(taskId: string, evaluation: SkillEffectEv
   return issues;
 }
 
-export function buildSkillEffectBucketRoot(baseRoot: string, bucket: SkillEffectBucket): string {
-  return path.join(baseRoot, "_skill_effect_buckets", bucket);
-}
 
 export async function runSkillEffectEvaluation(args: {
   workspace: SkillEffectWorkspace;

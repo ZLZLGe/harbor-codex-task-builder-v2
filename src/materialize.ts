@@ -20,6 +20,13 @@ const MATERIALIZE_ALLOWLIST = [
   "tests",
 ] as const;
 
+export const ACCEPTANCE_KINDS = ["pf_success", "oracle_fallback_success"] as const;
+export type AcceptanceKind = (typeof ACCEPTANCE_KINDS)[number];
+
+export function buildAcceptanceFinalRoot(finalRoot: string, acceptanceKind: AcceptanceKind): string {
+  return path.join(finalRoot, acceptanceKind);
+}
+
 async function copySelectedEntry(sourcePath: string, targetPath: string): Promise<void> {
   if (!(await pathExists(sourcePath))) {
     return;

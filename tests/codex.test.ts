@@ -13,25 +13,33 @@ function buildFakeCodex(args: {
   resumeBehaviors?: FakeThreadBehavior[];
 }): {
   codex: {
-    startThread: (_options?: unknown) => { id: string | null; run: () => Promise<{ items: unknown[]; finalResponse: string; usage: null }> };
+    startThread: (_options?: unknown) => {
+      id: string | null;
+      run: (input?: string) => Promise<{ items: unknown[]; finalResponse: string; usage: null }>;
+    };
     resumeThread: (
       threadId: string,
       _options?: unknown,
-    ) => { id: string | null; run: () => Promise<{ items: unknown[]; finalResponse: string; usage: null }> };
+    ) => { id: string | null; run: (input?: string) => Promise<{ items: unknown[]; finalResponse: string; usage: null }> };
   };
   startCallCount: () => number;
   resumeThreadIds: () => string[];
+  runInputs: () => string[];
 } {
   const startBehaviors = [...(args.startBehaviors ?? [])];
   const resumeBehaviors = [...(args.resumeBehaviors ?? [])];
   let startCalls = 0;
   const resumeIds: string[] = [];
+  const runInputs: string[] = [];
 
   function buildThread(behavior: FakeThreadBehavior | undefined, fallbackThreadId: string | null) {
     assert.ok(behavior, "缺少 fake thread behavior");
     return {
       id: behavior.threadId ?? fallbackThreadId,
-      async run() {
+      async run(input?: string) {
+        if (input) {
+          runInputs.push(input);
+        }
         if (behavior.error) {
           throw behavior.error;
         }
@@ -57,6 +65,7 @@ function buildFakeCodex(args: {
     },
     startCallCount: () => startCalls,
     resumeThreadIds: () => [...resumeIds],
+    runInputs: () => [...runInputs],
   };
 }
 
@@ -327,11 +336,19 @@ try {
       staticIssues: [],
       runtimeIssues: [],
       skillEffectIssues: [],
+      oracleFallbackIssues: [],
+      skillEffectEvidenceRoot: "/tmp/artifacts/skill_effect/task1/cycle-0-attempt-1",
+      skillEffectResultPath: "/tmp/artifacts/task1.skill-effect.cycle-0.attempt-1.json",
+      oracleFallbackEvidenceRoot: "/tmp/artifacts/oracle_fallback/task1/cycle-0-attempt-1",
+      oracleFallbackResultPath: "/tmp/artifacts/task1.oracle-fallback.cycle-0.attempt-1.json",
       threadId: "persisted-thread",
     });
     assert.equal(result.threadId, "persisted-thread");
     assert.equal(result.data.changedFiles[0], "instruction.md");
     assert.deepEqual(fakeCodex.resumeThreadIds(), ["persisted-thread", "persisted-thread"]);
+    assert.match(fakeCodex.runInputs()[0] ?? "", /Skill-effect evidence root: \/tmp\/artifacts\/skill_effect\/task1\/cycle-0-attempt-1/);
+    assert.match(fakeCodex.runInputs()[0] ?? "", /Oracle fallback evidence root: \/tmp\/artifacts\/oracle_fallback\/task1\/cycle-0-attempt-1/);
+    assert.doesNotMatch(fakeCodex.runInputs()[0] ?? "", /with_skill 日志根目录/);
     assert.equal(fakeCodex.startCallCount(), 0);
     assert.deepEqual(sleeps, [2_000]);
   }

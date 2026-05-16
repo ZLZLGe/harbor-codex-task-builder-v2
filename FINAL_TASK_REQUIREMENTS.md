@@ -28,21 +28,22 @@
 默认开启 skill-effect gate 且任务达到 `with_skill_pass__no_skill_fail` 时，发布目录结构固定为：
 
 ```text
-<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
-<output-root>/final/<template-id>/<scope>/<task-name>__no_skill
+<output-root>/final/pf_success/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/pf_success/<template-id>/<scope>/<task-name>__no_skill
 ```
 
-PF skill-effect bucket 镜像目录固定为：
+skill-effect 未达成 PF 但 oracle fallback 双版本通过时，发布目录结构固定为：
 
 ```text
-<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
-<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
+<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__no_skill
 ```
 
-显式关闭 skill-effect gate（`--skip-skill-effect-gate`）时，发布目录固定为：
+显式关闭 skill-effect gate（`--skip-skill-effect-gate`）时，会跳过 agent 对照并进入 oracle fallback。
 
 ```text
-<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__no_skill
 ```
 
 其中：
@@ -52,14 +53,13 @@ PF skill-effect bucket 镜像目录固定为：
   - `per-skill` 模式固定为目标 input skill 的 `dirName`
 - `task-name`
   - 只能是 `task1`、`task2` 这类 canonical name
-  - published scan / 历史去重 / 重复运行复用只认 `*__with_skill`
+  - published scan / 历史去重 / 重复运行复用只认 `final/pf_success` 和 `final/oracle_fallback_success` 下的 `*__with_skill`
   - `*__no_skill` 只是对照副本，不参与历史任务集合
 
 补充要求：
 
-- 非 PF 任务不再 materialize 到独立目录，只保留在 `raw/`、run summary 和 `manifest.jsonl`
-- 旧布局 `final/<template-id>/<scope>/<task-name>` 不兼容，当前代码只识别 `*__with_skill`
-- 上线前需要手动清理或迁移旧 `final/`
+- 非 PF 且非 oracle fallback 成功的任务不再 materialize 到 final，只保留在 `raw/`、run summary、`manifest.jsonl` 和 `trace_archive/failed`
+- 旧 direct final 原样保留，但当前代码不迁移、不删除、不识别
 
 family 层要求：
 
@@ -378,43 +378,45 @@ scope 约束：
 
 ## 12. 发布判断
 
-任务最终只有两种去向：
+任务最终有三种去向：
 
-- 满足要求
-  - 发布到 `<output-root>/final`
+- 满足 PF 要求
+  - 发布到 `<output-root>/final/pf_success`
+- 满足 oracle fallback 要求
+  - 发布到 `<output-root>/final/oracle_fallback_success`
 - 不满足要求
-  - 只保留在 `raw/` 与 run summary / manifest 中
+  - 只保留在 `raw/`、run summary、manifest 与 `trace_archive/failed` 中
 
-最终发布分两种情况：
+最终发布分两类成功：
 
 - 默认开启 skill-effect gate，且任务达到 `with_skill_pass__no_skill_fail`
   - 发布双版本：
-    - `<output-root>/final/<template-id>/<scope>/<task-name>__with_skill`
-    - `<output-root>/final/<template-id>/<scope>/<task-name>__no_skill`
+    - `<output-root>/final/pf_success/<template-id>/<scope>/<task-name>__with_skill`
+    - `<output-root>/final/pf_success/<template-id>/<scope>/<task-name>__no_skill`
   - 其中：
     - `__with_skill` 来自接受那一轮的 `variants/with_skill`
     - `__no_skill` 来自接受那一轮的 `variants/no_skill`
-    - `final/_skill_effect_buckets/` 只保留 PF bucket，并同样发布这两份目录
 - 显式关闭 skill-effect gate（`--skip-skill-effect-gate`）
-  - 只发布单版本：
-    - `<output-root>/final/<template-id>/<scope>/<task-name>__with_skill`
-  - 这条路径不会生成或发布 `__no_skill`
-  - 也不会写入 `final/_skill_effect_buckets/`
+  - 跳过 agent 对照，进入 oracle fallback
+- oracle fallback 双版本 oracle 都通过
+  - 发布双版本：
+    - `<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__with_skill`
+    - `<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__no_skill`
 
 补充说明：
 
-- 非 PF bucket 以及失败任务只在 `raw/artifacts` 中保留，不会 materialize 到 `final` 之外的其他目录
+- 非 PF 且未通过 oracle fallback 的任务只在 `raw/artifacts` 和 `trace_archive/failed` 中保留，不会 materialize 到 `final`
 
 当前执行语义还有两个关键点：
 
 - 任务按 `task1..taskN` 的顺序逐个执行
-- 某个任务一旦达到 `with_skill_pass__no_skill_fail`，会立即发布到 `final`，不会等待同 family 其他任务结束
+- 某个任务一旦达到 `with_skill_pass__no_skill_fail` 或 oracle fallback 成功，会立即发布到对应 final 成功出口，不会等待同 family 其他任务结束
 
 因此同一个 family 允许出现：
 
 - 一部分 task 已发布到 `final`
   - 默认 gate 开启且通过时，同时保留 `__with_skill` / `__no_skill`
-  - 显式 skip-gate 时，只保留 `__with_skill`
+  - oracle fallback 成功时，同样保留 `__with_skill` / `__no_skill`
 - 另一部分 task 未发布，但仍可通过 `raw/`、run summary 和 `manifest.jsonl` 回溯
 
 当前实现下，一个任务要进入发布态，至少意味着：
@@ -424,4 +426,4 @@ scope 约束：
 - Harbor Oracle runtime 通过
 - 并且满足下面二选一：
   - skill-effect gate 落在 `with_skill_pass__no_skill_fail`
-  - 或显式关闭了 skill-effect gate
+  - 或 oracle fallback 双版本通过

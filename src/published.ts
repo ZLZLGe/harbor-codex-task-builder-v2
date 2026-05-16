@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { GenerationUnit, PublishedTaskInfo } from "./discovery.js";
+import { ACCEPTANCE_KINDS, buildAcceptanceFinalRoot, type AcceptanceKind } from "./materialize.js";
 import { parseCanonicalTaskName, pathExists } from "./utils.js";
 
 export type PublishedFamilyState = {
@@ -35,12 +36,17 @@ export async function inspectPublishedFamily(
   unit: Pick<GenerationUnit, "template" | "scopeSlug" | "taskCount">,
   finalRoot: string,
 ): Promise<PublishedFamilyState> {
-  const finalFamilyDir = path.join(finalRoot, unit.template.templateId, unit.scopeSlug);
-  const publishedTasks: PublishedTaskInfo[] = [];
+  const finalFamilyDir = path.join(buildAcceptanceFinalRoot(finalRoot, "pf_success"), unit.template.templateId, unit.scopeSlug);
+  const publishedTasksByOrdinal = new Map<number, PublishedTaskInfo>();
   const existingTaskOrdinals = new Set<number>();
 
-  if (await pathExists(finalFamilyDir)) {
-    const entries = await fs.readdir(finalFamilyDir, { withFileTypes: true });
+  for (const acceptanceKind of [...ACCEPTANCE_KINDS].reverse() as AcceptanceKind[]) {
+    const familyDir = path.join(buildAcceptanceFinalRoot(finalRoot, acceptanceKind), unit.template.templateId, unit.scopeSlug);
+    if (!(await pathExists(familyDir))) {
+      continue;
+    }
+
+    const entries = await fs.readdir(familyDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) {
         continue;
@@ -51,10 +57,11 @@ export async function inspectPublishedFamily(
         continue;
       }
 
-      const taskDir = path.join(finalFamilyDir, entry.name);
+      const taskDir = path.join(familyDir, entry.name);
       const taskInfo: PublishedTaskInfo = {
         derivedTaskId: parsed.derivedTaskId,
         taskOrdinal: parsed.taskOrdinal,
+        acceptanceKind,
         taskDir,
         planPath: path.join(taskDir, "plan.json"),
         instructionPath: path.join(taskDir, "instruction.md"),
@@ -62,11 +69,12 @@ export async function inspectPublishedFamily(
         testOutputsPath: path.join(taskDir, "tests", "test_outputs.py"),
         environmentDir: path.join(taskDir, "environment"),
       };
-      publishedTasks.push(taskInfo);
+      publishedTasksByOrdinal.set(parsed.taskOrdinal, taskInfo);
       existingTaskOrdinals.add(parsed.taskOrdinal);
     }
   }
 
+  const publishedTasks = [...publishedTasksByOrdinal.values()];
   publishedTasks.sort((left, right) => left.taskOrdinal - right.taskOrdinal);
 
   return {

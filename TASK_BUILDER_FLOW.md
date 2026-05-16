@@ -65,22 +65,15 @@
 - output root：`/Users/leviviya/Documents/Harbor/codex_task_builder_v2_runs`
 - raw runs：`<output-root>/raw`
 - final tasks：`<output-root>/final`
-- PF bucket 镜像：`<output-root>/final/_skill_effect_buckets`
+- trace archive：`<output-root>/trace_archive`
 
 最终发布目录结构固定为：
 
 ```text
-<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
-# 默认 gate 开启且达到 PF 时，才会额外发布 __no_skill
-<output-root>/final/<template-id>/<scope>/<task-name>__no_skill
-```
-
-PF bucket 镜像目录结构固定为：
-
-```text
-# 只有默认 gate 开启且达到 PF 时才会写入 bucket 镜像
-<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
-<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
+<output-root>/final/pf_success/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/pf_success/<template-id>/<scope>/<task-name>__no_skill
+<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__no_skill
 ```
 
 其中：
@@ -225,14 +218,15 @@ CLI 现在只保留两类命令：
 程序会读取：
 
 ```text
-<output-root>/final/<template-id>/<scope>/
+<output-root>/final/pf_success/<template-id>/<scope>/
+<output-root>/final/oracle_fallback_success/<template-id>/<scope>/
 ```
 
 下已经发布的任务：
 
-- 只识别已有的 `taskN__with_skill`
+- 只识别这两个新成功出口下的 `taskN__with_skill`
 - 会忽略对应的 `*__no_skill`
-- 也不会兼容旧布局 `<task-name>` 或旧的 `similarN__with_skill` / `transferN__with_skill`
+- 不识别旧 direct final，也不会兼容旧的 `similarN__with_skill` / `transferN__with_skill`
 
 然后只补缺失槽位。
 
@@ -458,6 +452,7 @@ runtime 通过标准：
   - 表示 `no_skill` 是异常失败，必须优先修复 variant / verifier / runtime 问题
 
 只有 `with_skill_pass__no_skill_fail` 视为接受；其余所有 bucket 都会触发 repair。
+如果 `--max-skill-effect-repair-rounds` 耗尽仍未达到 PF，会进入 oracle fallback。
 
 ### 第 11 步：repair
 
@@ -494,7 +489,7 @@ task_attempts/<task-id>/attempt-<n>/draft/
 如果当前 attempt：
 
 - 超过 `--task-attempt-timeout-hours`
-- 或在当前 attempt 内耗尽 `--max-repair-rounds`
+- 或在当前 attempt 内耗尽对应阶段 repair 预算
 
 则该 attempt 会结束；只要 `--max-task-restarts` 还有余额，程序就会重新创建新的 `attempt-<n+1>/` 从头 fresh restart。
 
@@ -503,23 +498,22 @@ task_attempts/<task-id>/attempt-<n>/draft/
 当前 task 在 blocking reviewer、static validate、Harbor Oracle runtime 都通过之后，发布分两条路径：
 
 - 默认开启 skill-effect gate
-  - 只有当 skill-effect bucket 为 `with_skill_pass__no_skill_fail`
-    - 即 `with_skill` 通过
-    - 且 `no_skill` 是“结果文件正常、无 exception、reward < 1”的有效失败
-  - 才会被视为 `PF`，并立即：
-    - 从接受那一轮的 `variants/with_skill` 复制到 `final/<template-id>/<scope>/<task-name>__with_skill`
-    - 从接受那一轮的 `variants/no_skill` 复制到 `final/<template-id>/<scope>/<task-name>__no_skill`
-    - 同步镜像到 `final/_skill_effect_buckets/with_skill_pass__no_skill_fail/...`
-    - 追加到当前 unit 的已发布 sibling 列表
+	  - 只有当 skill-effect bucket 为 `with_skill_pass__no_skill_fail`
+	    - 即 `with_skill` 通过
+	    - 且 `no_skill` 是“结果文件正常、无 exception、reward < 1”的有效失败
+	  - 才会被视为 `PF`，并立即：
+	    - 从接受那一轮的 `variants/with_skill` 复制到 `final/pf_success/<template-id>/<scope>/<task-name>__with_skill`
+	    - 从接受那一轮的 `variants/no_skill` 复制到 `final/pf_success/<template-id>/<scope>/<task-name>__no_skill`
+	    - 追加到当前 unit 的已发布 sibling 列表
 - 显式关闭 skill-effect gate（`--skip-skill-effect-gate`）
-  - runtime 通过后就会直接发布
-  - 只会把当前 draft 复制到 `final/<template-id>/<scope>/<task-name>__with_skill`
-  - 不会生成 `__no_skill`
-  - 也不会写入 `final/_skill_effect_buckets/`
+  - 会跳过 agent 对照，直接进入 oracle fallback
+- oracle fallback
+  - 双版本 oracle 都通过时发布到 `final/oracle_fallback_success/...`
+  - 这类任务可运行可验证，但不证明 skill bottleneck
 
 后续 task 可以读取这个刚发布的 sibling，但不会重新打开它。
 
-如果当前 task 在用尽 repair 轮数后仍未达到上面的发布条件，则不会被复制到额外目录，只会保留在当前 run 的 `raw/`、manifest 和 run summary 中。
+如果当前 task 在用尽对应阶段 repair 预算后仍未达到上面的发布条件，则不会被复制到 final，只会保留在当前 run 的 `raw/`、manifest、run summary 和 `trace_archive/failed` 中。
 
 因此当前实现允许：
 
@@ -538,21 +532,15 @@ task_attempts/<task-id>/attempt-<n>/draft/
 默认开启 gate 且达到 PF 时，实际发布路径为：
 
 ```text
-<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
-<output-root>/final/<template-id>/<scope>/<task-name>__no_skill
+<output-root>/final/pf_success/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/pf_success/<template-id>/<scope>/<task-name>__no_skill
 ```
 
-PF bucket 会额外落盘到：
+oracle fallback 成功时，实际发布路径为：
 
 ```text
-<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__with_skill
-<output-root>/final/_skill_effect_buckets/with_skill_pass__no_skill_fail/<template-id>/<scope>/<task-name>__no_skill
-```
-
-显式关闭 gate 时，实际发布路径为：
-
-```text
-<output-root>/final/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__with_skill
+<output-root>/final/oracle_fallback_success/<template-id>/<scope>/<task-name>__no_skill
 ```
 
 ## 7. 产物与日志
@@ -569,6 +557,7 @@ workspace `artifacts/` 中常见产物包括：
 - `<task>.runtime.cycle-<n>.json`
 - `<task>.runtime.cycle-<n>.attempt-<m>.json`
 - `<task>.skill-effect.cycle-<n>.attempt-<m>.json`
+- `<task>.oracle-fallback.cycle-<n>.attempt-<m>.json`
 - `<task>.repair.<n>.json`
 - `<task>.repair.<n>.raw.json`
 
@@ -576,6 +565,8 @@ output root 顶层还会额外写：
 
 - `<output-root>/manifest.jsonl`
 - `<output-root>/<run-id>.json`
+- `<output-root>/trace_archive/<outcome>/<template-id>/<scope>/<task-name>/pair-run-.../with_skill/result.json`
+- `<output-root>/trace_archive/<outcome>/<template-id>/<scope>/<task-name>/pair-run-.../no_skill/result.json`
 
 ## 8. 当前版本最重要的语义变化
 
@@ -589,4 +580,4 @@ output root 顶层还会额外写：
 
 ## 9. 一句话总结
 
-**当前 `codex_task_builder_v2` 的主流程是：先把 template 和 input skills 组装成 family unit，再按 `task1..taskN` 的固定顺序逐槽位执行单题 planner；每个 task 都在独立的 `task_attempts/<task-id>/attempt-<n>/` 工作区内完成 writer、单题 blocking 审查、static validate、Harbor Oracle runtime 和 skill-effect 对照，并在超时或 repair 用尽时 fresh restart 到新的 attempt；默认 gate 开启时，某个任务只有在达到真正 PF 的 `with_skill_pass__no_skill_fail` 时才会把 `__with_skill` / `__no_skill` 两份快照一起发布到 `<output-root>/final`；如果显式关闭 skill-effect gate，则 runtime 通过后只发布 `__with_skill`，其他失败结果只留在 `raw`。**
+**当前 `codex_task_builder_v2` 的主流程是：先把 template 和 input skills 组装成 family unit，再按 `task1..taskN` 的固定顺序逐槽位执行单题 planner；每个 task 都在独立的 `task_attempts/<task-id>/attempt-<n>/` 工作区内完成 writer、单题 blocking 审查、static validate、Harbor Oracle runtime、skill-effect 对照和必要的 oracle fallback；修复预算按 pre-runtime / runtime / skill-effect / oracle fallback 四阶段独立计算；PF 成功发布到 `<output-root>/final/pf_success`，兜底成功发布到 `<output-root>/final/oracle_fallback_success`，全过程对照轨迹整理复制到 `<output-root>/trace_archive`。**

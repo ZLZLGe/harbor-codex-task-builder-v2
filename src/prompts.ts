@@ -31,6 +31,7 @@ function renderScopeBrief(unit: GenerationUnit): string {
 function renderPublishedTaskEntry(task: PublishedTaskInfo): string {
   return dedent(`
     - ${task.derivedTaskId}
+      acceptance kind: ${task.acceptanceKind ?? "unknown"}
       task dir: ${task.taskDir}
       read first: ${task.planPath}
       then read: ${task.instructionPath}
@@ -97,11 +98,12 @@ function renderHarborOracleBaseline(): string {
 function renderTaskArtifactContracts(): string {
   return dedent(`
     关键文件契约:
-    - solution/solve.sh 必须基于输入资产、任务规则和公开依赖生成可通过测试的结果，不得直接搬运任务内现成答案。
+    - solution/solve.sh 必须像真实 solver 一样，基于输入资产、任务规则和公开依赖推导可通过测试的结果。
     - solution/solve.sh、tests/test.sh、tests/test_outputs.py、instruction.md不能直接导入skill路径，instruction.md 不能直接要求做题者要使用 input skills （即用来造任务的skill），原因是：假设agent要执行去掉skill后的任务时，做完以后通过test.sh去验收agent做的结果是否正确，如果有直接导入skill路径之类的话，那么由于dockerfile里面去掉skill了，就会出错。
     - tests/test_outputs.py 只能校验 instruction.md 已经说明或可直接推出的输出契约，并面向结果语义而不是未承诺的实现细节。
-    - 如果在验证agent是否成功通过任务的时候，tests/test_outputs.py 不得依赖固定关键词、固定短语、固定同义词集合或唯一措辞，除非 instruction.md 明确说明要输出固定关键词、固定短语、固定同义词集合或唯一措辞。
-    - 如果 tests/test_outputs.py 依赖instruction.md未承诺的实现细节，如内部函数名、唯一中间步骤或固定关键词，应视为 hidden requirement。
+    - verifier 主测试只能断言 instruction.md 明确写出的用户可见契约；如果测试要求字段、端点、文件路径、状态码、schema 名称或输出结构，instruction.md 必须明确说明。
+    - 防作弊测试只能检测硬编码、fixture 过拟合或 shortcut 行为，不得引入主任务契约之外的新功能要求。
+    - 在验证agent是否成功通过任务的时候，tests/test_outputs.py 不得依赖固定关键词、固定短语、固定同义词集合或唯一措辞，除非 instruction.md 明确说明要输出固定关键词、固定短语、固定同义词集合或唯一措辞。
   `);
 }
 
@@ -112,7 +114,7 @@ function renderInstructionWritingRules(): string {
     - 写题前先阅读目标 skill，理解它的适用场景、核心工作流和输出判断方式；任务设计应考验 solver 是否能自然识别并执行这种工作流，但 instruction.md 不要明说“使用某个 skill”。
     - 题面只保留用户可见的交付合同：输入位置、输入资产含义、要完成的任务、输出文件、必要格式和边界条件。
     - 弱化或移走本应由 skill 提供的诊断细节、推理步骤和专家判断框架。
-    - instruction.md 不得提及 verifier、tests、solution、task.toml、plan.json、/logs 或 skill 安装路径。
+    - instruction.md 不得提及 verifier、tests、solution、task.toml、plan.json、/logs、shipped skill payload、installed skill path 或内部 task package 细节。
     - 推荐结构: Brief opening, Input data, Your task, Output, Notes。
   `);
 }
@@ -235,7 +237,7 @@ export function buildTaskAttemptBrief(
     当前工作语义:
     1. 从 template_source/ 读取完整上下文，包括 task.toml、instruction.md、environment/、environment/skills/、solution/、tests；同时阅读 input_skills/ 里的真实 shipped skills。
     2. 如 final-root 中已有同 family 的已发布任务，必须直接读取这些任务目录，避免和它们撞题。
-    3. 当前只处理这个 task 的当前 attempt；不要把自己当成 family planner，也不要尝试一次规划整个 family。
+    3. 当前只处理这个 task 的当前 attempt。
     4. 历史 attempt 和其他 task 的未发布草稿都不属于当前上下文，不要把它们当成正式历史任务或去重基准。
     5. 正式历史任务只看 final-root 下已发布的 *__with_skill 任务；不要把 *__no_skill 对照副本当成正式历史任务。
     6. 派生任务只写到 ${draftDirLabel}，不要直接写入最终发布目录。
@@ -383,6 +385,7 @@ export function buildTaskWriterPrompt(
     ${renderTemplateReferenceRules(`${draftDirLabel}environment/`)}
     ${renderInputSkillRules(unit, { draftSkillDirLabel: `${draftDirLabel}environment/skills/` })}
     ${renderSkillEffectDesignRules(unit)}
+    - 未修改的初始 environment 必须无法通过 verifier；任务必须要求 solver 基于题面和输入资产产生实际修改或输出。
     ${renderTaskArtifactContracts()}
     ${renderInstructionWritingRules()}
     ${renderVerifierDesignPrinciples()}
@@ -413,6 +416,7 @@ export function buildTaskWriterPrompt(
     - 必须保留 plan.json，不要删除或改名；如需更新，只能与当前 blueprint 保持一致。
     ${renderDockerfileRules()}
     - 不要把当前任务实现成比 blueprint 更轻的版本；尤其不要通过教程式 instruction、暴露关键步骤、放置一眼可见答案或单命令捷径，把它稀释成 easy/普通 medium 小题。
+    - 不得对已发布 sibling 任务做简单领域换皮；必须在任务场景、输入资产、输出语义和 verifier 判定方式上形成实质差异。
     - instruction.md 和 environment 输入资产都不得暴露 solution/tests/task.toml/plan.json/logs 等任务内部实现细节。
     ${renderHarborOracleBaseline()}
 
@@ -438,10 +442,6 @@ export function buildBlockingReviewerPrompt(
   } = {},
 ): string {
   const draftDirLabel = options.draftDirLabel ?? "draft/";
-  const publishedTaskList =
-    unit.publishedTasks.length === 0
-      ? "- none"
-      : unit.publishedTasks.map((task) => renderPublishedTaskEntry(task)).join("\n");
 
   return dedent(`
     不要修改任何文件。你现在只负责单题 blocking 审查。
@@ -457,35 +457,21 @@ export function buildBlockingReviewerPrompt(
     - ${plan.derivedTaskId} (${buildTaskDisplayName(plan)}) -> ${draftDirLabel}
     - 当前只审这个 task 的当前 attempt；历史 attempt 和其他未发布草稿都不属于当前上下文。
 
-    已发布 Harbor family 目录: ${unit.finalFamilyDir || "unknown"}
-    已发布 tasks:
-    ${publishedTaskList}
+    历史任务去重主要由 planner/writer 负责；reviewer 不需要逐项复审已发布任务。
+    只有当前 draft 明显复制已发布 *__with_skill 任务的场景、输入资产、输出契约和 verifier 策略时，才作为 blocking 问题指出。
+    不要把历史 attempt、未发布草稿或 *__no_skill 对照副本作为正式去重基准。
 
     审查目标:
-    - 只判断当前 task 是否存在 blocking 问题：
-      - instruction.md、task.toml 的 metadata.name、metadata.description 是否使用英文；只要出现中文，就直接判定失败
-      - ${draftDirLabel}environment/skills/ 是否与 input_skills/ 保持一致；writer 不应改写 injected skill payload
-      - instruction.md 是否暴露了skill路径，verifier 内部实现，或任务包内部专用文件/目录，例如 /solution、solution/、任务根的 tests/test.sh、任务根的 tests/test_outputs.py、task.toml、plan.json、/logs/verifier；如果存在，直接判定失败
-      - tests/test.sh 是否先执行 mkdir -p /logs/verifier
-      - reward 是否写到 /logs/verifier/reward.txt 或 /logs/verifier/reward.json
-      - 是否稳定写出 reward，而不是裸跑测试后直接结束
-      - 是否存在 set -e/pipefail 导致写 reward 前提前退出的路径
-      - task.toml 是否显式包含 [environment].build_timeout_sec、[agent].timeout_sec、[verifier].timeout_sec；如果缺失任一 timeout 字段，直接判定为 blocking 问题
-      - environment/ 如果直接提供了任务完整标准答案，直接判错
-      - solution/solve.sh 如果不是根据输入资产进行解题，例如直接硬编码答案来强行通过任务，直接判错
-      - verifier 是否明确分为主测试和防作弊测试；如果没有清晰区分这两部分，直接判定失败
-      - verifier 是否只检查 instruction.md 中已说明、或可直接推出的输出契约，并面向结果语义而不是未承诺的实现细节；否则视为 hidden requirement
-      - 对自由文本主输出，tests/test_outputs.py 是否依赖固定关键词、固定短语、固定同义词集合或唯一措辞；除非 instruction.md 明确要输出固定关键词、固定短语、固定同义词集合或唯一措辞，否则直接视为 hidden requirement
-      - 如果 solution 在补充题目规则，说明题面存在隐藏要求，直接判定失败
-      - 防作弊测试是否只拦截作弊路径，而不是额外增加题面未承诺的新要求；如果防作弊测试引入 hidden requirement，直接判定失败
-      - solution/solve.sh、tests/test.sh、tests/test_outputs.py 是否直接引用 environment/skills/**、/root/.codex/skills/**、/app/skills/** 或其他 skill 安装路径/模块；只要存在这种硬依赖，就直接判定失败
-      - solution/solve.sh、tests/test.sh、tests/test_outputs.py、environment/Dockerfile 的路径契约是否一致
-      - 当前 task 是否与 final-root 下已发布 *__with_skill sibling / 历史任务在任务场景、输入资产、输出语义或测试判定方式上过于接近；如果过近，直接判定失败
-      - 运行时需要写入的目录是否显式创建
-      - environment/Dockerfile 是否显式声明 WORKDIR；如果不是 /root，相关脚本路径是否仍然一致
-      - environment/Dockerfile 的 FROM 是否使用了私有/本地 registry，或未允许的 registry
-      - environment/Dockerfile 是否出现 COPY . /root、ADD . /root 或同类宽泛复制
-      - environment/Dockerfile 是否把 skills 复制到了 /root/environment/skills、/app/skills、/workspace/skills 等普通运行时路径
+    - 只判断当前 task 是否存在 blocking 问题；下面任一项不满足，都必须判定 blockingPass=false：
+      - 英文与隐藏信息: instruction.md、task.toml 的 metadata.name 和 metadata.description 必须全英文；instruction.md 不得暴露 skill 路径、verifier/solution/tests/task.toml/plan.json/logs 等内部实现或任务包专用路径。
+      - injected skills: ${draftDirLabel}environment/skills/ 必须与 input_skills/ 一致；writer 不应改写 injected skill payload，不得修改、删除、重排或增补。
+      - task.toml: 必须显式包含 [environment].build_timeout_sec、[agent].timeout_sec、[verifier].timeout_sec。
+      - verifier reward: tests/test.sh 必须先 mkdir -p /logs/verifier，并在所有通过/失败/异常路径稳定写出 /logs/verifier/reward.txt 或 reward.json；不得因 set -e/pipefail、裸跑测试或提前退出导致 reward 缺失。
+      - solver 与 skill 解耦: solution/solve.sh 是否像真实 solver 一样基于输入资产、任务规则和公开依赖推导答案；solution/solve.sh、tests/test.sh、tests/test_outputs.py 不得硬依赖 environment/skills/**、/root/.codex/skills/**、/app/skills/** 或其他 skill 安装路径。
+      - 未修改的初始 environment 如果可以通过 verifier，直接判定为 blocking 问题；任务必须要求 solver 产生实际修改或输出。
+      - verifier 契约: verifier 必须清晰区分主测试和防作弊测试；只能检查 instruction.md 明确说明或可直接推出的结果语义，不得测试未承诺实现细节、固定措辞/关键词/同义词集合，除非题面明确要求；防作弊测试只能拦截 shortcut，不得新增 hidden requirement。
+      - 路径与写入目录: solution/solve.sh、tests/test.sh、tests/test_outputs.py、environment/Dockerfile 的路径契约必须一致；运行时写入目录必须显式创建。
+      - Dockerfile: 必须显式声明 WORKDIR；若 WORKDIR 不是 /root，脚本路径仍须一致；FROM 不得使用私有/本地或未允许 registry；不得使用 COPY . /root、ADD . /root 或同类宽泛复制；不得把 skills 复制到 /root/environment/skills、/app/skills、/workspace/skills 等普通运行时路径。
 
     返回格式要求:
     - taskResults 中只返回当前这个任务
@@ -504,6 +490,7 @@ export function buildRepairPrompt(args: {
   staticIssues: string[];
   runtimeIssues: string[];
   skillEffectIssues: string[];
+  oracleFallbackIssues: string[];
   runtimeDir?: string;
   runtimeLogRoot?: string;
   runtimeLogIndexPath?: string;
@@ -514,16 +501,11 @@ export function buildRepairPrompt(args: {
   verifierStdoutPath?: string;
   rewardPath?: string;
   artifactManifestPath?: string;
+  skillEffectEvidenceRoot?: string;
   skillEffectResultPath?: string;
   skillEffectBucket?: string;
-  withSkillLogRoot?: string;
-  withSkillResultPath?: string;
-  withSkillRewardPath?: string;
-  withSkillTrajectoryPath?: string;
-  noSkillLogRoot?: string;
-  noSkillResultPath?: string;
-  noSkillRewardPath?: string;
-  noSkillTrajectoryPath?: string;
+  oracleFallbackEvidenceRoot?: string;
+  oracleFallbackResultPath?: string;
 }): string {
   const draftDirLabel = args.draftDirLabel ?? "draft/";
   const blockingBlock =
@@ -542,6 +524,10 @@ export function buildRepairPrompt(args: {
     args.skillEffectIssues.length > 0
       ? args.skillEffectIssues.map((issue) => `- ${issue}`).join("\n")
       : "- 无 skill-effect 问题";
+  const oracleFallbackBlock =
+    args.oracleFallbackIssues.length > 0
+      ? args.oracleFallbackIssues.map((issue) => `- ${issue}`).join("\n")
+      : "- 无 oracle fallback 问题";
 
   return dedent(`
     你正在修复一个 Harbor task 草稿。
@@ -564,8 +550,11 @@ export function buildRepairPrompt(args: {
     skill-effect:
     ${skillEffectBlock}
 
+    oracle fallback:
+    ${oracleFallbackBlock}
+
     你还可以读取这些本 attempt 的运行证据:
-    - 本次 Oracle runtime 完整日志目录: ${args.runtimeLogRoot ?? args.runtimeDir ?? "当前没有完整 runtime 目录"}
+    - Oracle runtime evidence root: ${args.runtimeLogRoot ?? args.runtimeDir ?? "当前没有 Oracle runtime evidence root"}
     - 日志索引: ${args.runtimeLogIndexPath ?? "当前没有 log-index.json"}
     - Oracle 日志: ${args.runtimeLogPath ?? "当前没有 runtime log"}
     - Oracle 结果 JSON: ${args.runtimeResultPath ?? "当前没有 result.json"}
@@ -574,47 +563,40 @@ export function buildRepairPrompt(args: {
     - verifier 输出: ${args.verifierStdoutPath ?? "当前没有 verifier/test-stdout.txt"}
     - reward 文件: ${args.rewardPath ?? "当前没有 reward.txt/reward.json"}
     - artifacts manifest: ${args.artifactManifestPath ?? "当前没有 artifacts/manifest.json"}
+    - Skill-effect evidence root: ${args.skillEffectEvidenceRoot ?? "当前没有 skill-effect evidence root"}
     - skill-effect 总结 JSON: ${args.skillEffectResultPath ?? "当前没有 skill-effect result json"}
     - skill-effect bucket: ${args.skillEffectBucket ?? "当前没有 skill-effect bucket"}
-    - with_skill 日志根目录: ${args.withSkillLogRoot ?? "当前没有 with_skill log root"}
-    - with_skill 结果 JSON: ${args.withSkillResultPath ?? "当前没有 with_skill result.json"}
-    - with_skill reward 文件: ${args.withSkillRewardPath ?? "当前没有 with_skill reward"}
-    - with_skill trajectory: ${args.withSkillTrajectoryPath ?? "当前没有 with_skill trajectory.json"}
-    - no_skill 日志根目录: ${args.noSkillLogRoot ?? "当前没有 no_skill log root"}
-    - no_skill 结果 JSON: ${args.noSkillResultPath ?? "当前没有 no_skill result.json"}
-    - no_skill reward 文件: ${args.noSkillRewardPath ?? "当前没有 no_skill reward"}
-    - no_skill trajectory: ${args.noSkillTrajectoryPath ?? "当前没有 no_skill trajectory.json"}
+    - Oracle fallback evidence root: ${args.oracleFallbackEvidenceRoot ?? "当前没有 oracle fallback evidence root"}
+    - Oracle fallback summary JSON: ${args.oracleFallbackResultPath ?? "当前没有 oracle fallback summary JSON"}
 
     修复要求:
-    - 优先最小化改动，只修当前列出的问题。
     - 必须保留 plan.json，不要删除。
     - instruction.md、task.toml 的 metadata.name、metadata.description 必须保持英文，不要写中文任务描述。
-    - 不要改变 task.toml 的 metadata.id、metadata.source_template_id 所代表的任务身份；如当前这些字段缺失或错误，可以把它们修正到与 plan.json 一致。metadata.task_role 如存在只能是 "task"。
     - 如果 task.toml 缺少 [environment].build_timeout_sec、[agent].timeout_sec 或 [verifier].timeout_sec，必须补齐；秒数根据 template_source/task.toml、当前任务复杂度和测试耗时合理设置，不要依赖 Harbor 默认值。
-    - 如果 blocking reviewer 指出当前 task 与已发布 *__with_skill sibling / 历史任务过近，优先通过修改 instruction、输入资产、输出契约或验收对象把它们拉开差异；不要改 task id 或 taskOrdinal。
     - 不要修改 environment/skills/ 下 injected skill payload；如果需要调整 skill 使用方式，应通过题目本身、输入资产、tests 修正，而不是改 skill 内容。
     - 如果 solution/solve.sh 或 tests/** 直接调用 skill 模块，必须去耦：把最小必需逻辑搬到任务自身代码里；最终参考解与 verifier 在有 skill / 无 skill 两种评测设置都要能运行。
-    - 不要引入隐藏测试要求；instruction、tests、solution 应保持一致。
-    - 修复 instruction.md 时必须保持简洁的用户题面结构：Brief opening, Input data, Your task, Output, Notes；不要改成教程式解法，也不要暴露 verifier/test/skill 安装细节。
+    - 修复 solution/solve.sh 时，必须像真实 solver 一样，基于输入资产、任务规则和公开依赖推导可通过测试的结果。
+    - 未修改的初始 workspace 必须仍然不能通过 verifier；不要通过降低 verifier 或预置答案让空跑通过。
+    - 修复 instruction.md 时必须保持简洁的用户题面结构：Brief opening, Input data, Your task, Output, Notes；不要改成教程式解法，也不要暴露 verifier/test/solution/task.toml/logs、shipped skill payload、installed skill path 或内部 task package 细节。
+    - 如果问题是已发布 *__with_skill sibling / 历史任务过近，必须实质调整任务场景、输入资产、输出语义或 verifier 判定方式，不要只换领域名词。
     - verifier 必须继续保持主测试和防作弊测试两部分的清晰分工；修复时不要把它们重新混成一个难以解释的大测试。
+    - 修复 verifier 主测试时，只能断言 instruction.md 明确写出的用户可见契约；字段、端点、文件路径、状态码、schema 名称和输出结构如果被测试要求，必须已在 instruction.md 中说明。
+    - 修复防作弊测试时，只能检测硬编码、fixture 过拟合或 shortcut 行为，不得引入主任务契约之外的新功能要求。
     - 如果当前任务的主输出是自由文本，而 tests/test_outputs.py 依赖固定关键词、固定短语、固定同义词集合或唯一措辞，只有 instruction.md 已明确要输出固定关键词、固定短语、固定同义词集合或唯一措辞，才允许保留这种检查。
     - 如果需要修改 environment/Dockerfile，请继续满足下面这些 Dockerfile 契约：
     ${renderDockerfileRules()}
     - 如果需要修改 environment/Dockerfile，FROM 不得使用私有/本地 registry，或未允许的 registry。
-    - 你应把完整日志目录当作主入口，自由递归读取相关证据，而不是只盯住某一个摘要文件。
-    - log-index.json、harbor-run.log、job.log、trial.log、verifier/test-stdout.txt、reward 文件、result.json、artifacts/manifest.json 只是常见线索，不是固定顺序。
-    - 不要只根据 reward=0、摘要 issue 或 failure label 猜问题；如果 runtime 日志或 result.json 暴露了 Harbor oracle/runtime 失败原因，必须优先根据日志修正。
-    - 优先排查 verifier 契约问题、输入资产复制问题、运行时路径错误、目录未创建、reward 未稳定落盘等高频问题。
-    - 如果命中了 skill-effect 问题，必须对照检查 with_skill 和 no_skill 两边的日志、result.json、reward 与 trajectory，尤其要先分析有无skill情况下的trajectory，并按下面顺序排查：
-      1. no_skill 变体构造是否正确
-      2. verifier 是否引入隐藏要求，或允许通过篡改本应只读的输入资产来取巧过关
-      3. with_skill 失败是否来自 runtime / budget / 路径问题
-      4. no_skill 通过是否是因为任务设计过于简单
-      4. 若以上都无异常，再按任务当前不可用处理并继续常规修复
+    - 你应把完整日志目录或阶段 evidence root 当作主入口，自由递归读取相关证据，而不是只盯住某一个摘要文件。需要具体 result、reward 或 trajectory 时，从对应 evidence root 下递归查找 log-index.json、result.json、with_skill/、no_skill/ 和 variants/。
+    - skill-effect 修复必须先按 bucket 分类：
+      1. with_skill pass / no_skill pass：优先判断任务是否太简单、verifier 是否没有检查 skill 关键工作流、no_skill 是否仍有 shortcut 或残留 skill 线索。
+      2. with_skill fail / no_skill pass：这是反向劣势，优先检查 skill 工作流是否被题面/输入/测试误导，verifier 是否过拟合 no-skill 输出，或 with_skill 是否遇到 runtime/budget/path 问题。
+      3. with_skill fail / no_skill fail：优先按任务不可用处理，检查 runtime、verifier、题面可执行性、输入资产完整性。
+      4. with_skill pass / no_skill invalid fail：不要直接接受，优先检查 no_skill 变体构造、runtime、verifier 稳定性，确保 no_skill 是有效 reward 失败而不是无效失败。
+    - 如果命中 oracle fallback 问题，只检查 oracle fallback 的 with_skill/no_skill result.json、reward、exception 和 runtime logs；oracle fallback 通常没有 trajectory.json，不要要求或等待 trajectory。
+    - 不要为了保留过窄测试而把 hidden requirement 硬塞进 instruction.md；优先让 verifier 回到 instruction.md 已承诺的用户可见契约。只有确实属于必要用户契约时，才同步修改 instruction.md 和 verifier。
     - 返回 JSON 时，summary 只简短说明你修了什么，不要复述原因。
-    - 返回 JSON 时，repairReason 要详细说明为什么这轮需要修，必须基于当前 reviewer/static/runtime/skill-effect 问题和你读到的证据来写，不能空泛。
+    - 返回 JSON 时，repairReason 要详细说明为什么这轮需要修，必须基于当前问题和你读到的证据来写，不能空泛。
     - repairReason 必须写出本轮最关键的问题，以及为什么本轮改动是在针对这个根因。
-    - 如果命中了 skill-effect，repairReason 必须说明 with_skill / no_skill 对比里观察到的核心差异，以及为什么这些观察导向本轮修改方向。
 
     完成修改后，返回严格 JSON:
     {
